@@ -41,6 +41,19 @@ class DocumentManager:
             return list(self._test_docs)
         raise ValueError("doc_type must be 'requirements' or 'test_procedures'")
 
+    def set_documents(self, doc_type: str, paths: List[str]) -> None:
+        if doc_type == "requirements":
+            self._requirement_docs = list(paths)
+            return
+        if doc_type == "test_procedures":
+            self._test_docs = list(paths)
+            return
+        raise ValueError("doc_type must be 'requirements' or 'test_procedures'")
+
+    def clear(self) -> None:
+        self._requirement_docs = []
+        self._test_docs = []
+
     @staticmethod
     def _avoid_overwrite(path: str) -> str:
         if not os.path.exists(path):

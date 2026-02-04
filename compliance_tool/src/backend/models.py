@@ -1,10 +1,11 @@
 from dataclasses import dataclass, field
-from typing import List
+from typing import List, Optional
 
 
 @dataclass(frozen=True)
 class Requirement:
     req_id: str
+    stakeholder_id: Optional[str]
     source_doc: str
 
 
@@ -15,8 +16,17 @@ class TestCase:
     source_doc: str
 
 
-@dataclass
+@dataclass(frozen=True)
 class AnalysisResult:
     req_id: str
+    stakeholder_id: Optional[str]
+    source_doc: str
     covered: bool
     test_steps: List[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class OrphanReference:
+    ts_id: str
+    ref_id: str
+    source_doc: str
