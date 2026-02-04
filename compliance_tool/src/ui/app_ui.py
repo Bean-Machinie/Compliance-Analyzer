@@ -8,19 +8,22 @@ from src.backend.exporter import export_analysis_csv
 from src.backend.models import AnalysisResult, OrphanReference, Requirement, TestCase
 from src.backend.parser import parse_requirements, parse_test_procedures
 from src.backend.project_manager import ProjectManager
+from src.ui.command_controller import CommandController
 from src.ui.components import labeled_frame, make_tree
+from src.ui.sankey_view import SankeyView
 from src.utils.logger import get_logger
 
 
 class ComplianceApp:
     def __init__(self, root: tk.Tk):
         self.root = root
-        self.root.title("Compliance Analyzer - Phase 2")
+        self.root.title("Compliance Analyzer - Phase 3")
         self.logger = get_logger(self.__class__.__name__)
 
         self.base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
         self.doc_manager = DocumentManager(self.base_dir)
         self.project_manager = ProjectManager(self.base_dir)
+        self.commands = CommandController(self)
 
         self.requirements = {}
         self.test_cases = []
@@ -31,26 +34,20 @@ class ComplianceApp:
 
         self._build_ui()
         self._update_title()
-        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+        self.root.protocol("WM_DELETE_WINDOW", self.handle_exit)
 
     def _build_ui(self) -> None:
-        self.root.geometry("1020x700")
-        self.root.minsize(900, 650)
+        self.root.geometry("1120x760")
+        self.root.minsize(980, 700)
 
         self._build_menu()
 
         toolbar = ttk.Frame(self.root, padding=6)
         toolbar.pack(fill="x")
 
-        ttk.Button(toolbar, text="New Project", command=self.new_project).pack(side="left", padx=4)
-        ttk.Button(toolbar, text="Open Project", command=self.open_project).pack(side="left", padx=4)
-        ttk.Button(toolbar, text="Save Project", command=self.save_project).pack(side="left", padx=4)
-        ttk.Button(toolbar, text="Save As", command=self.save_project_as).pack(side="left", padx=4)
-        ttk.Separator(toolbar, orient="vertical").pack(side="left", fill="y", padx=6)
-        ttk.Button(toolbar, text="Add Requirement Docs", command=self.add_requirements).pack(side="left", padx=4)
-        ttk.Button(toolbar, text="Add Test Procedure Docs", command=self.add_tests).pack(side="left", padx=4)
-        ttk.Button(toolbar, text="Run Analysis", command=self.run_analysis).pack(side="left", padx=4)
-        ttk.Button(toolbar, text="Export CSV", command=self.export_csv).pack(side="left", padx=4)
+        ttk.Button(toolbar, text="Add Requirement Docs", command=self.commands.add_requirements).pack(side="left", padx=4)
+        ttk.Button(toolbar, text="Add Test Procedure Docs", command=self.commands.add_tests).pack(side="left", padx=4)
+        ttk.Button(toolbar, text="Run Analysis", command=self.commands.run_analysis).pack(side="left", padx=4)
 
         self.status_var = tk.StringVar(value="Ready")
         ttk.Label(self.root, textvariable=self.status_var, anchor="w").pack(fill="x", padx=8, pady=2)
@@ -61,26 +58,29 @@ class ComplianceApp:
         self.coverage_frame = ttk.Frame(notebook)
         self.orphan_frame = ttk.Frame(notebook)
         self.summary_frame = ttk.Frame(notebook)
+        self.trace_frame = ttk.Frame(notebook)
 
         notebook.add(self.coverage_frame, text="Requirements Coverage")
         notebook.add(self.orphan_frame, text="Orphan Test References")
         notebook.add(self.summary_frame, text="Summary")
+        notebook.add(self.trace_frame, text="Traceability View")
 
         self._build_coverage_tab()
         self._build_orphan_tab()
         self._build_summary_tab()
+        self._build_traceability_tab()
 
     def _build_menu(self) -> None:
         menubar = tk.Menu(self.root)
         file_menu = tk.Menu(menubar, tearoff=0)
-        file_menu.add_command(label="New Project", command=self.new_project)
-        file_menu.add_command(label="Open Project", command=self.open_project)
-        file_menu.add_command(label="Save Project", command=self.save_project)
-        file_menu.add_command(label="Save Project As", command=self.save_project_as)
+        file_menu.add_command(label="New Project", command=self.commands.new_project)
+        file_menu.add_command(label="Open Project", command=self.commands.open_project)
+        file_menu.add_command(label="Save Project", command=self.commands.save_project)
+        file_menu.add_command(label="Save Project As", command=self.commands.save_project_as)
         file_menu.add_separator()
-        file_menu.add_command(label="Export Analysis to CSV", command=self.export_csv)
+        file_menu.add_command(label="Export Analysis to CSV", command=self.commands.export_csv)
         file_menu.add_separator()
-        file_menu.add_command(label="Exit", command=self._on_close)
+        file_menu.add_command(label="Exit", command=self.commands.exit_app)
         menubar.add_cascade(label="File", menu=file_menu)
         self.root.config(menu=menubar)
 
@@ -101,8 +101,9 @@ class ComplianceApp:
         )
 
     def _build_summary_tab(self) -> None:
-        frame = labeled_frame(self.summary_frame, "Summary")
+        frame = labeled_frame(self.summary_frame, "Summary Dashboard")
         self.summary_vars = {
+            "total_stakeholders": tk.StringVar(value="0"),
             "total_requirements": tk.StringVar(value="0"),
             "covered_requirements": tk.StringVar(value="0"),
             "uncovered_requirements": tk.StringVar(value="0"),
@@ -110,7 +111,8 @@ class ComplianceApp:
         }
 
         rows = [
-            ("Total Requirements", "total_requirements"),
+            ("Total Stakeholder Requirements", "total_stakeholders"),
+            ("Total System Requirements", "total_requirements"),
             ("Covered Requirements", "covered_requirements"),
             ("Uncovered Requirements", "uncovered_requirements"),
             ("Coverage Percentage", "coverage_percent"),
@@ -119,6 +121,18 @@ class ComplianceApp:
         for i, (label, key) in enumerate(rows):
             ttk.Label(frame, text=label).grid(row=i, column=0, sticky="w", padx=6, pady=6)
             ttk.Label(frame, textvariable=self.summary_vars[key]).grid(row=i, column=1, sticky="w", padx=6, pady=6)
+
+        ttk.Separator(frame, orient="horizontal").grid(row=len(rows), column=0, columnspan=2, sticky="ew", pady=6)
+        ttk.Label(frame, text="Quick Filters").grid(row=len(rows) + 1, column=0, sticky="w", padx=6)
+        btn_frame = ttk.Frame(frame)
+        btn_frame.grid(row=len(rows) + 1, column=1, sticky="w", padx=6)
+        ttk.Button(btn_frame, text="All", command=lambda: self._set_trace_coverage("All")).pack(side="left", padx=2)
+        ttk.Button(btn_frame, text="Covered", command=lambda: self._set_trace_coverage("Covered")).pack(side="left", padx=2)
+        ttk.Button(btn_frame, text="Uncovered", command=lambda: self._set_trace_coverage("Uncovered")).pack(side="left", padx=2)
+
+    def _build_traceability_tab(self) -> None:
+        self.sankey_view = SankeyView(self.trace_frame)
+        self.sankey_view.pack(fill="both", expand=True)
 
     def _set_dirty(self, dirty: bool) -> None:
         self.dirty = dirty
@@ -129,7 +143,11 @@ class ComplianceApp:
         suffix = " *" if self.dirty else ""
         self.root.title(f"Compliance Analyzer - {name}{suffix}")
 
-    def new_project(self) -> None:
+    def _set_trace_coverage(self, value: str) -> None:
+        self.sankey_view.filters_panel.coverage_var.set(value)
+        self._refresh_sankey()
+
+    def handle_new_project(self) -> None:
         if not self._confirm_discard():
             return
         name = simpledialog.askstring("New Project", "Project name:")
@@ -140,7 +158,7 @@ class ComplianceApp:
         self._set_dirty(False)
         self.status_var.set("New project created")
 
-    def open_project(self) -> None:
+    def handle_open_project(self) -> None:
         if not self._confirm_discard():
             return
         filepath = filedialog.askopenfilename(
@@ -155,7 +173,7 @@ class ComplianceApp:
         self._set_dirty(False)
         self.status_var.set(f"Opened project {filepath}")
 
-    def save_project(self) -> None:
+    def handle_save_project(self) -> None:
         try:
             path = self.project_manager.save_project(
                 None,
@@ -168,13 +186,13 @@ class ComplianceApp:
                 self.summary,
             )
         except ValueError:
-            self.save_project_as()
+            self.handle_save_project_as()
             return
 
         self._set_dirty(False)
         self.status_var.set(f"Saved project to {path}")
 
-    def save_project_as(self) -> None:
+    def handle_save_project_as(self) -> None:
         filepath = filedialog.asksaveasfilename(
             title="Save Compliance Project",
             defaultextension=".compliance",
@@ -196,7 +214,7 @@ class ComplianceApp:
         self._set_dirty(False)
         self.status_var.set(f"Saved project to {filepath}")
 
-    def add_requirements(self) -> None:
+    def handle_add_requirements(self) -> None:
         filepaths = filedialog.askopenfilenames(
             title="Select Requirement Documents",
             filetypes=[("Word Documents", "*.docx")],
@@ -218,10 +236,10 @@ class ComplianceApp:
 
         if added:
             self._set_dirty(True)
-        self._refresh_coverage()
+        self._refresh_all_views()
         self.status_var.set(f"Added {added} requirement document(s)")
 
-    def add_tests(self) -> None:
+    def handle_add_tests(self) -> None:
         filepaths = filedialog.askopenfilenames(
             title="Select Test Procedure Documents",
             filetypes=[("Word Documents", "*.docx")],
@@ -242,10 +260,10 @@ class ComplianceApp:
 
         if added:
             self._set_dirty(True)
-        self._refresh_orphans()
+        self._refresh_all_views()
         self.status_var.set(f"Added {added} test procedure document(s)")
 
-    def run_analysis(self) -> None:
+    def handle_run_analysis(self) -> None:
         if not self.requirements:
             messagebox.showwarning("No Requirements", "Please add requirement documents first.")
             return
@@ -260,7 +278,7 @@ class ComplianceApp:
         self._set_dirty(True)
         self.status_var.set("Analysis complete")
 
-    def export_csv(self) -> None:
+    def handle_export_csv(self) -> None:
         if not self.results:
             messagebox.showwarning("No Results", "Run analysis before exporting.")
             return
@@ -273,6 +291,11 @@ class ComplianceApp:
             return
         export_analysis_csv(filepath, self.results)
         self.status_var.set(f"Exported CSV to {filepath}")
+
+    def handle_exit(self) -> None:
+        if not self._confirm_discard():
+            return
+        self.root.destroy()
 
     def _reset_state(self) -> None:
         self.requirements = {}
@@ -336,6 +359,7 @@ class ComplianceApp:
         self._refresh_coverage()
         self._refresh_orphans()
         self._refresh_summary()
+        self._refresh_sankey()
 
     def _refresh_coverage(self) -> None:
         for item in self.coverage_tree.get_children():
@@ -374,11 +398,20 @@ class ComplianceApp:
 
     def _refresh_summary(self) -> None:
         summary = self.summary or {}
-        self.summary_vars["total_requirements"].set(summary.get("total_requirements", 0))
+        stakeholders = {req.stakeholder_id for req in self.requirements.values() if req.stakeholder_id}
+        self.summary_vars["total_stakeholders"].set(len(stakeholders))
+        self.summary_vars["total_requirements"].set(summary.get("total_requirements", len(self.requirements)))
         self.summary_vars["covered_requirements"].set(summary.get("covered_requirements", 0))
         self.summary_vars["uncovered_requirements"].set(summary.get("uncovered_requirements", 0))
         coverage_pct = summary.get("coverage_percent", 0)
         self.summary_vars["coverage_percent"].set(f"{coverage_pct}%")
+
+    def _refresh_sankey(self) -> None:
+        stakeholders = sorted({req.stakeholder_id for req in self.requirements.values() if req.stakeholder_id})
+        requirement_ids = sorted(self.requirements.keys())
+        test_cases = sorted({tc.ts_id.split(".")[0] for tc in self.test_cases if tc.ts_id})
+        self.sankey_view.set_options(stakeholders, requirement_ids, test_cases)
+        self.sankey_view.set_data(list(self.requirements.values()), self.test_cases, self.results)
 
     def _confirm_discard(self) -> bool:
         if not self.dirty:
@@ -390,14 +423,9 @@ class ComplianceApp:
         if response is None:
             return False
         if response:
-            self.save_project()
+            self.handle_save_project()
             return not self.dirty
         return True
-
-    def _on_close(self) -> None:
-        if not self._confirm_discard():
-            return
-        self.root.destroy()
 
 
 def run_app() -> None:
