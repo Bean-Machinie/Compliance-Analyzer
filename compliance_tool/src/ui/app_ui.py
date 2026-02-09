@@ -31,6 +31,8 @@ class ComplianceApp:
         self.orphans = []
         self.summary = {}
         self.dirty = False
+        self.coverage_row_colors = {}
+        self._coverage_menu_iid = None
 
         self._build_ui()
         self._update_title()
@@ -132,6 +134,27 @@ class ComplianceApp:
             columns=["stakeholder", "req_id", "covered", "test_steps", "source_doc"],
             headings=["Stakeholder ID", "Requirement ID", "Covered", "Linked Test Cases", "Source Document"],
         )
+        self._init_coverage_colors()
+
+    def _init_coverage_colors(self) -> None:
+        self.coverage_tree.tag_configure("color_red", background="#f5b7b1")
+        self.coverage_tree.tag_configure("color_yellow", background="#f9e79f")
+        self.coverage_tree.tag_configure("color_green", background="#abebc6")
+        self.coverage_tree.tag_configure("color_blue", background="#aed6f1")
+        self.coverage_tree.tag_configure("color_gray", background="#d5d8dc")
+
+        menu = tk.Menu(self.root, tearoff=0)
+        menu.add_command(label="Mark Red", command=lambda: self._set_coverage_row_color("color_red"))
+        menu.add_command(label="Mark Yellow", command=lambda: self._set_coverage_row_color("color_yellow"))
+        menu.add_command(label="Mark Green", command=lambda: self._set_coverage_row_color("color_green"))
+        menu.add_command(label="Mark Blue", command=lambda: self._set_coverage_row_color("color_blue"))
+        menu.add_command(label="Mark Gray", command=lambda: self._set_coverage_row_color("color_gray"))
+        menu.add_separator()
+        menu.add_command(label="Clear Color", command=self._clear_coverage_row_color)
+        self.coverage_menu = menu
+
+        self.coverage_tree.bind("<Button-3>", self._show_coverage_menu)
+        self.coverage_tree.bind("<Button-2>", self._show_coverage_menu)
 
     def _build_orphan_tab(self) -> None:
         frame = labeled_frame(self.orphan_frame, "Orphan Test References")
@@ -454,12 +477,16 @@ class ComplianceApp:
             ),
         )
         for res in rows:
+            iid = self._coverage_row_key(res)
             covered = "YES" if res.covered else "NO"
             steps = ", ".join(res.test_steps) if res.test_steps else "-"
+            tag = self.coverage_row_colors.get(iid)
             self.coverage_tree.insert(
                 "",
                 tk.END,
+                iid=iid,
                 values=(res.stakeholder_id or "", res.req_id, covered, steps, res.source_doc),
+                tags=([tag] if tag else []),
             )
 
     def _clear_coverage_filters(self) -> None:
@@ -468,6 +495,36 @@ class ComplianceApp:
                 var.set("All")
             else:
                 var.set("")
+
+    @staticmethod
+    def _coverage_row_key(res: AnalysisResult) -> str:
+        stakeholder = res.stakeholder_id or ""
+        source_doc = res.source_doc or ""
+        return f"{res.req_id}||{stakeholder}||{source_doc}"
+
+    def _show_coverage_menu(self, event: tk.Event) -> None:
+        row_id = self.coverage_tree.identify_row(event.y)
+        if not row_id:
+            return
+        self.coverage_tree.selection_set(row_id)
+        self._coverage_menu_iid = row_id
+        self.coverage_menu.tk_popup(event.x_root, event.y_root)
+
+    def _set_coverage_row_color(self, tag: str) -> None:
+        row_id = self._coverage_menu_iid
+        if not row_id:
+            return
+        self.coverage_row_colors[row_id] = tag
+        if self.coverage_tree.exists(row_id):
+            self.coverage_tree.item(row_id, tags=[tag])
+
+    def _clear_coverage_row_color(self) -> None:
+        row_id = self._coverage_menu_iid
+        if not row_id:
+            return
+        self.coverage_row_colors.pop(row_id, None)
+        if self.coverage_tree.exists(row_id):
+            self.coverage_tree.item(row_id, tags=[])
 
     def _refresh_orphans(self) -> None:
         for item in self.orphan_tree.get_children():
