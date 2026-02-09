@@ -1,6 +1,6 @@
 import os
 import re
-from typing import List
+from typing import List, Set
 import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
@@ -35,6 +35,7 @@ class ComplianceApp:
         self.dirty = False
         self.coverage_row_colors = {}
         self._coverage_menu_iid = None
+        self.config_requirements: Set[str] = set()
 
         self._build_ui()
         self._update_title()
@@ -52,6 +53,9 @@ class ComplianceApp:
         ttk.Button(toolbar, text="Add Requirement Docs", command=self.commands.add_requirements).pack(side="left", padx=4)
         ttk.Button(toolbar, text="Add Test Procedure Docs", command=self.commands.add_tests).pack(side="left", padx=4)
         ttk.Button(toolbar, text="Run Analysis", command=self.commands.run_analysis).pack(side="left", padx=4)
+        ttk.Button(toolbar, text="Config Requirements", command=self._open_config_requirements).pack(
+            side="left", padx=4
+        )
 
         self.status_var = tk.StringVar(value="Ready")
         ttk.Label(self.root, textvariable=self.status_var, anchor="w").pack(fill="x", padx=8, pady=2)
@@ -257,6 +261,7 @@ class ComplianceApp:
                 self.results,
                 self.orphans,
                 self.summary,
+                config_requirements=sorted(self.config_requirements),
             )
         except ValueError:
             self.handle_save_project_as()
@@ -283,6 +288,7 @@ class ComplianceApp:
             self.results,
             self.orphans,
             self.summary,
+            config_requirements=sorted(self.config_requirements),
         )
         self._set_dirty(False)
         self.status_var.set(f"Saved project to {filepath}")
@@ -344,9 +350,7 @@ class ComplianceApp:
             messagebox.showwarning("No Tests", "Please add test procedure documents first.")
             return
 
-        self.results, self.orphans, self.summary = analyze(
-            list(self.requirements.values()), self.test_cases
-        )
+        self._recompute_analysis()
         self._refresh_all_views()
         self._set_dirty(True)
         self.status_var.set("Analysis complete")
@@ -377,10 +381,12 @@ class ComplianceApp:
         self.results = []
         self.orphans = []
         self.summary = {}
+        self.config_requirements = set()
         self.doc_manager.clear()
         self._refresh_all_views()
 
     def _load_from_payload(self, payload: dict) -> None:
+        self.config_requirements = set(payload.get("config_requirements", []))
         req_docs = [self.project_manager.resolve_path(p) for p in payload.get("requirement_documents", [])]
         test_docs = [self.project_manager.resolve_path(p) for p in payload.get("test_documents", [])]
         self.doc_manager.set_documents("requirements", req_docs)
@@ -453,7 +459,7 @@ class ComplianceApp:
                     test_steps=[],
                     test_cases=[],
                 )
-                for req in self.requirements.values()
+                for req in self._active_requirements()
             ]
         filters = getattr(self, "coverage_filter_vars", None)
         if filters:
@@ -578,20 +584,22 @@ class ComplianceApp:
 
     def _refresh_summary(self) -> None:
         summary = self.summary or {}
-        stakeholders = {req.stakeholder_id for req in self.requirements.values() if req.stakeholder_id}
+        active_reqs = self._active_requirements()
+        stakeholders = {req.stakeholder_id for req in active_reqs if req.stakeholder_id}
         self.summary_vars["total_stakeholders"].set(len(stakeholders))
-        self.summary_vars["total_requirements"].set(summary.get("total_requirements", len(self.requirements)))
+        self.summary_vars["total_requirements"].set(summary.get("total_requirements", len(active_reqs)))
         self.summary_vars["covered_requirements"].set(summary.get("covered_requirements", 0))
         self.summary_vars["uncovered_requirements"].set(summary.get("uncovered_requirements", 0))
         coverage_pct = summary.get("coverage_percent", 0)
         self.summary_vars["coverage_percent"].set(f"{coverage_pct}%")
 
     def _refresh_sankey(self) -> None:
-        stakeholders = sorted({req.stakeholder_id for req in self.requirements.values() if req.stakeholder_id})
-        requirement_ids = sorted(self.requirements.keys())
+        active_reqs = self._active_requirements()
+        stakeholders = sorted({req.stakeholder_id for req in active_reqs if req.stakeholder_id})
+        requirement_ids = sorted({req.req_id for req in active_reqs})
         test_cases = sorted({tc.ts_id.split(".")[0] for tc in self.test_cases if tc.ts_id})
         self.sankey_view.set_options(stakeholders, requirement_ids, test_cases)
-        self.sankey_view.set_data(list(self.requirements.values()), self.test_cases, self.results)
+        self.sankey_view.set_data(active_reqs, self.test_cases, self.results)
 
     def _confirm_discard(self) -> bool:
         if not self.dirty:
@@ -606,6 +614,103 @@ class ComplianceApp:
             self.handle_save_project()
             return not self.dirty
         return True
+
+    def _active_requirements(self) -> List[Requirement]:
+        if not self.config_requirements:
+            return list(self.requirements.values())
+        return [r for r in self.requirements.values() if r.req_id not in self.config_requirements]
+
+    def _recompute_analysis(self) -> None:
+        active = self._active_requirements()
+        self.results, self.orphans, self.summary = analyze(
+            active,
+            self.test_cases,
+            excluded_req_ids=self.config_requirements,
+        )
+
+    def _open_config_requirements(self) -> None:
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Configuration Requirements")
+        dialog.geometry("520x380")
+        dialog.transient(self.root)
+        dialog.grab_set()
+
+        info = ttk.Label(
+            dialog,
+            text="These requirement IDs are excluded from coverage, summary, and traceability.",
+            anchor="w",
+        )
+        info.pack(fill="x", padx=10, pady=6)
+
+        body = ttk.Frame(dialog)
+        body.pack(fill="both", expand=True, padx=10, pady=6)
+
+        listbox = tk.Listbox(body, height=10)
+        listbox.pack(side="left", fill="both", expand=True)
+        scrollbar = ttk.Scrollbar(body, orient="vertical", command=listbox.yview)
+        listbox.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side="right", fill="y")
+
+        for req_id in sorted(self.config_requirements):
+            listbox.insert(tk.END, req_id)
+
+        entry_frame = ttk.Frame(dialog)
+        entry_frame.pack(fill="x", padx=10, pady=6)
+        entry_var = tk.StringVar()
+        ttk.Label(entry_frame, text="Add ID").pack(side="left", padx=4)
+        entry = ttk.Entry(entry_frame, textvariable=entry_var, width=24)
+        entry.pack(side="left", padx=4)
+
+        def add_single() -> None:
+            val = entry_var.get().strip()
+            if not val:
+                return
+            if val not in listbox.get(0, tk.END):
+                listbox.insert(tk.END, val)
+            entry_var.set("")
+
+        ttk.Button(entry_frame, text="Add", command=add_single).pack(side="left", padx=4)
+
+        bulk_frame = ttk.Frame(dialog)
+        bulk_frame.pack(fill="both", expand=True, padx=10, pady=6)
+        ttk.Label(bulk_frame, text="Bulk add (comma/space/newline separated)").pack(anchor="w")
+        bulk_text = tk.Text(bulk_frame, height=5)
+        bulk_text.pack(fill="both", expand=True)
+
+        def add_bulk() -> None:
+            raw = bulk_text.get("1.0", tk.END)
+            parts = re.split(r"[,\s]+", raw.strip())
+            for part in parts:
+                if not part:
+                    continue
+                if part not in listbox.get(0, tk.END):
+                    listbox.insert(tk.END, part)
+            bulk_text.delete("1.0", tk.END)
+
+        ttk.Button(bulk_frame, text="Add Bulk", command=add_bulk).pack(anchor="e", pady=4)
+
+        actions = ttk.Frame(dialog)
+        actions.pack(fill="x", padx=10, pady=6)
+
+        def remove_selected() -> None:
+            for idx in reversed(listbox.curselection()):
+                listbox.delete(idx)
+
+        def clear_all() -> None:
+            listbox.delete(0, tk.END)
+
+        def apply_and_close() -> None:
+            self.config_requirements = set(listbox.get(0, tk.END))
+            if self.test_cases and self.requirements:
+                self._recompute_analysis()
+            self._refresh_all_views()
+            self._set_dirty(True)
+            dialog.destroy()
+
+        ttk.Button(actions, text="Remove Selected", command=remove_selected).pack(side="left", padx=4)
+        ttk.Button(actions, text="Clear", command=clear_all).pack(side="left", padx=4)
+        ttk.Button(actions, text="Apply", command=apply_and_close).pack(side="right", padx=4)
+        ttk.Button(actions, text="Cancel", command=dialog.destroy).pack(side="right", padx=4)
 
 
 def run_app() -> None:

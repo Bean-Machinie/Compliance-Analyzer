@@ -25,6 +25,7 @@ class ProjectManager:
         results: List[AnalysisResult],
         orphans: List[OrphanReference],
         summary: Dict[str, float],
+        config_requirements: Optional[List[str]] = None,
     ) -> str:
         if path is None:
             if self.project_path is None:
@@ -39,6 +40,7 @@ class ProjectManager:
             results,
             orphans,
             summary,
+            config_requirements=config_requirements,
         )
 
         with open(path, "w", encoding="utf-8") as f:
@@ -67,11 +69,13 @@ class ProjectManager:
         results: List[AnalysisResult],
         orphans: List[OrphanReference],
         summary: Dict[str, float],
+        config_requirements: Optional[List[str]] = None,
     ) -> dict:
         return {
             "project_name": self.project_name,
             "requirement_documents": [self._to_rel(p) for p in requirement_docs],
             "test_documents": [self._to_rel(p) for p in test_docs],
+            "config_requirements": config_requirements or [],
             "requirements": [
                 {
                     "id": r.req_id,
