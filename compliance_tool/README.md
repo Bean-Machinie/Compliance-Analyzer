@@ -37,7 +37,7 @@ python main.py
 5. Save Project (`.compliance`)
 
 ## Notes
-- Documents are copied into `documents/requirements/` and `documents/test_procedures/`.
+- Documents are copied into a temporary session folder (outside the repo) for parsing only.
 - Saving is manual only; closing with unsaved changes will prompt you.
 - All visualization runs locally; no internet is required.
 

@@ -42,12 +42,13 @@ def _is_acceptance_heading(text: str) -> bool:
     return normalized in ("accept criteria", "acceptance criteria")
 
 
-def parse_requirements(doc_path: str) -> List[Requirement]:
+def parse_requirements(doc_path: str, source_label: Optional[str] = None) -> List[Requirement]:
     doc = Document(doc_path)
     requirements: List[Requirement] = []
     seen = set()
     current_stakeholder: Optional[str] = None
     in_acceptance = False
+    source_doc = source_label or doc_path
 
     for para in doc.paragraphs:
         text = (para.text or "").strip()
@@ -78,15 +79,16 @@ def parse_requirements(doc_path: str) -> List[Requirement]:
                 continue
             seen.add(key)
             requirements.append(
-                Requirement(req_id=req_id, stakeholder_id=current_stakeholder, source_doc=doc_path)
+                Requirement(req_id=req_id, stakeholder_id=current_stakeholder, source_doc=source_doc)
             )
 
     return requirements
 
 
-def parse_test_procedures(doc_path: str) -> List[TestCase]:
+def parse_test_procedures(doc_path: str, source_label: Optional[str] = None) -> List[TestCase]:
     doc = Document(doc_path)
     test_cases: List[TestCase] = []
+    source_doc = source_label or doc_path
 
     for table in doc.tables:
         header_idx = None
@@ -120,6 +122,6 @@ def parse_test_procedures(doc_path: str) -> List[TestCase]:
             if not ids:
                 continue
             for ref_id in ids:
-                test_cases.append(TestCase(ts_id=ts_val, ref_id=ref_id, source_doc=doc_path))
+                test_cases.append(TestCase(ts_id=ts_val, ref_id=ref_id, source_doc=source_doc))
 
     return test_cases

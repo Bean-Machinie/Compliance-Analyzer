@@ -1,5 +1,6 @@
 import os
 import shutil
+import tempfile
 from typing import List
 
 from src.utils.logger import get_logger
@@ -9,10 +10,14 @@ class DocumentManager:
     def __init__(self, base_dir: str):
         self.base_dir = base_dir
         self.logger = get_logger(self.__class__.__name__)
-        self.requirements_dir = os.path.join(base_dir, "documents", "requirements")
-        self.test_dir = os.path.join(base_dir, "documents", "test_procedures")
+        self._temp_root = self._create_temp_root()
+        self.requirements_dir = os.path.join(self._temp_root, "requirements")
+        self.test_dir = os.path.join(self._temp_root, "test_procedures")
         self._requirement_docs: List[str] = []
         self._test_docs: List[str] = []
+
+    def _create_temp_root(self) -> str:
+        return tempfile.mkdtemp(prefix="compliance_analyzer_")
 
     def add_document(self, filepath: str, doc_type: str) -> str:
         if doc_type not in ("requirements", "test_procedures"):
@@ -25,12 +30,12 @@ class DocumentManager:
         dest_path = self._avoid_overwrite(dest_path)
 
         shutil.copy2(filepath, dest_path)
-        self.logger.info("Copied %s to %s", filepath, dest_path)
+        self.logger.info("Copied %s to temp %s", filepath, dest_path)
 
         if doc_type == "requirements":
-            self._requirement_docs.append(dest_path)
+            self._requirement_docs.append(filepath)
         else:
-            self._test_docs.append(dest_path)
+            self._test_docs.append(filepath)
 
         return dest_path
 
@@ -53,6 +58,14 @@ class DocumentManager:
     def clear(self) -> None:
         self._requirement_docs = []
         self._test_docs = []
+        self.cleanup()
+
+    def cleanup(self) -> None:
+        if self._temp_root and os.path.isdir(self._temp_root):
+            shutil.rmtree(self._temp_root, ignore_errors=True)
+        self._temp_root = self._create_temp_root()
+        self.requirements_dir = os.path.join(self._temp_root, "requirements")
+        self.test_dir = os.path.join(self._temp_root, "test_procedures")
 
     @staticmethod
     def _avoid_overwrite(path: str) -> str:

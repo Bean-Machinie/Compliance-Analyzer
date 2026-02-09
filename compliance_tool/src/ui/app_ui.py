@@ -226,7 +226,7 @@ class ComplianceApp:
         for fp in filepaths:
             try:
                 dest = self.doc_manager.add_document(fp, "requirements")
-                reqs = parse_requirements(dest)
+                reqs = parse_requirements(dest, source_label=fp)
                 for req in reqs:
                     self.requirements.setdefault(req.req_id, req)
                 added += 1
@@ -251,7 +251,7 @@ class ComplianceApp:
         for fp in filepaths:
             try:
                 dest = self.doc_manager.add_document(fp, "test_procedures")
-                test_cases = parse_test_procedures(dest)
+                test_cases = parse_test_procedures(dest, source_label=fp)
                 self.test_cases.extend(test_cases)
                 added += 1
             except Exception as exc:
@@ -295,6 +295,7 @@ class ComplianceApp:
     def handle_exit(self) -> None:
         if not self._confirm_discard():
             return
+        self.doc_manager.cleanup()
         self.root.destroy()
 
     def _reset_state(self) -> None:
