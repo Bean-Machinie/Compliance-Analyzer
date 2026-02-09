@@ -10,7 +10,7 @@ REQ_PREFIXES_SYSTEM = ("BNC", "DLS", "NSE")
 REQ_PREFIXES_STAKEHOLDER = ("BNCS", "DLSS", "NSES")
 
 ID_PATTERN = re.compile(
-    r"[#\[\(]?\s*(?P<id>(?:BNC|DLS|NSE|BNCS|DLSS|NSES)\d+)\s*[\]\)]?"
+    r"[#\[\(]?\s*(?P<id>(?:BNC|DLS|NSE|BNCS|DLSS|NSES)\s*-?\s*\d+)\s*[\]\)]?"
 )
 TS_PATTERN = re.compile(r"^\d+(?:\.\d+)*$")
 TEST_CASE_PATTERN = re.compile(
@@ -28,7 +28,13 @@ def _is_section(text: str, targets: Iterable[str]) -> bool:
 
 
 def _extract_ids(text: str) -> List[str]:
-    return [m.group("id") for m in ID_PATTERN.finditer(text or "")]
+    ids = []
+    for m in ID_PATTERN.finditer(text or ""):
+        raw = m.group("id")
+        cleaned = re.sub(r"[\s-]+", "", raw or "")
+        if cleaned:
+            ids.append(cleaned)
+    return ids
 
 
 def _normalize_header(text: str) -> str:
@@ -59,8 +65,19 @@ def parse_requirements(doc_path: str, source_label: Optional[str] = None) -> Lis
     requirements: List[Requirement] = []
     seen = set()
     current_stakeholder: Optional[str] = None
-    in_acceptance = False
     source_doc = source_label or doc_path
+    source_doc = source_label or doc_path
+
+    def add_system_ids(ids: List[str], stakeholder: Optional[str]) -> None:
+        system_ids = [i for i in ids if i.startswith(REQ_PREFIXES_SYSTEM)]
+        for req_id in system_ids:
+            key = (req_id, stakeholder, doc_path)
+            if key in seen:
+                continue
+            seen.add(key)
+            requirements.append(
+                Requirement(req_id=req_id, stakeholder_id=stakeholder, source_doc=source_doc)
+            )
 
     for para in doc.paragraphs:
         text = (para.text or "").strip()
@@ -71,28 +88,19 @@ def parse_requirements(doc_path: str, source_label: Optional[str] = None) -> Lis
         stakeholder_ids = [i for i in ids if i.startswith(REQ_PREFIXES_STAKEHOLDER)]
         if stakeholder_ids:
             current_stakeholder = stakeholder_ids[-1]
+        add_system_ids(ids, current_stakeholder)
 
-        if _is_acceptance_heading(text):
-            in_acceptance = True
-            continue
-
-        if in_acceptance and para.style is not None:
-            style_name = (para.style.name or "").lower()
-            if style_name.startswith("heading") and not _is_acceptance_heading(text):
-                in_acceptance = False
-
-        if not in_acceptance:
-            continue
-
-        system_ids = [i for i in ids if i.startswith(REQ_PREFIXES_SYSTEM)]
-        for req_id in system_ids:
-            key = (req_id, current_stakeholder, doc_path)
-            if key in seen:
-                continue
-            seen.add(key)
-            requirements.append(
-                Requirement(req_id=req_id, stakeholder_id=current_stakeholder, source_doc=source_doc)
-            )
+    for table in doc.tables:
+        for row in table.rows:
+            for cell in row.cells:
+                text = (cell.text or "").strip()
+                if not text:
+                    continue
+                ids = _extract_ids(text)
+                stakeholder_ids = [i for i in ids if i.startswith(REQ_PREFIXES_STAKEHOLDER)]
+                if stakeholder_ids:
+                    current_stakeholder = stakeholder_ids[-1]
+                add_system_ids(ids, current_stakeholder)
 
     return requirements
 
