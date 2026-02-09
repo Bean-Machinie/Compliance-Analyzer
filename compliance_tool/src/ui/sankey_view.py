@@ -233,7 +233,7 @@ class SankeyView(ttk.Frame):
         if node.node_type == "system":
             stake = node.metadata.get("stakeholder") or "-"
             covered = "YES" if node.metadata.get("covered") else "NO"
-            steps = sorted({tc.ts_id for tc in self.test_cases if tc.ref_id == node.label})
+            steps = sorted({tc.ts_id for tc in self.test_cases if tc.ref_id == node.label and tc.ts_id})
             step_text = ", ".join(steps) if steps else "-"
             self.detail_text.set(
                 "System Requirement\n"

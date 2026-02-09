@@ -12,19 +12,28 @@ def analyze(
     req_ids = {r.req_id for r in req_list}
 
     coverage: Dict[str, List[str]] = {}
+    case_coverage: Dict[str, List[str]] = {}
     for tc in tc_list:
-        coverage.setdefault(tc.ref_id, []).append(tc.ts_id)
+        if tc.ts_id:
+            coverage.setdefault(tc.ref_id, []).append(tc.ts_id)
+        if tc.test_case_id:
+            label = f"Test Case {tc.test_case_id}"
+            if tc.test_case_title:
+                label = f"{label}: {tc.test_case_title}"
+            case_coverage.setdefault(tc.ref_id, []).append(label)
 
     results: List[AnalysisResult] = []
     for req in req_list:
         test_steps = sorted(set(coverage.get(req.req_id, [])))
+        test_cases = sorted(set(case_coverage.get(req.req_id, [])))
         results.append(
             AnalysisResult(
                 req_id=req.req_id,
                 stakeholder_id=req.stakeholder_id,
                 source_doc=req.source_doc,
-                covered=bool(test_steps),
+                covered=bool(test_steps or test_cases),
                 test_steps=test_steps,
+                test_cases=test_cases,
             )
         )
 

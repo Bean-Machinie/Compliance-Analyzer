@@ -85,6 +85,8 @@ class ProjectManager:
                     "test_id": tc.ts_id,
                     "requirement_id": tc.ref_id,
                     "source_document": self._to_rel(tc.source_doc),
+                    "test_case_id": tc.test_case_id,
+                    "test_case_title": tc.test_case_title,
                 }
                 for tc in test_cases
             ],
@@ -92,6 +94,7 @@ class ProjectManager:
                 r.req_id: {
                     "covered": r.covered,
                     "test_cases": r.test_steps,
+                    "test_case_numbers": r.test_cases,
                     "stakeholder": r.stakeholder_id,
                     "source_document": self._to_rel(r.source_doc),
                 }

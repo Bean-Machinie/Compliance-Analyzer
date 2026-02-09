@@ -1,4 +1,6 @@
 import os
+import re
+from typing import List
 import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
@@ -131,8 +133,15 @@ class ComplianceApp:
 
         self.coverage_tree = make_tree(
             frame,
-            columns=["stakeholder", "req_id", "covered", "test_steps", "source_doc"],
-            headings=["Stakeholder ID", "Requirement ID", "Covered", "Linked Test Cases", "Source Document"],
+            columns=["stakeholder", "req_id", "covered", "test_cases", "test_steps", "source_doc"],
+            headings=[
+                "Stakeholder ID",
+                "Requirement ID",
+                "Covered",
+                "Test Case Number",
+                "Linked Test Cases",
+                "Source Document",
+            ],
         )
         self._init_coverage_colors()
 
@@ -391,6 +400,8 @@ class ComplianceApp:
                 ts_id=tc["test_id"],
                 ref_id=tc["requirement_id"],
                 source_doc=self.project_manager.resolve_path(tc.get("source_document", "")),
+                test_case_id=tc.get("test_case_id"),
+                test_case_title=tc.get("test_case_title"),
             )
             for tc in payload.get("test_cases", [])
         ]
@@ -405,6 +416,7 @@ class ComplianceApp:
                     source_doc=self.project_manager.resolve_path(entry.get("source_document", "")),
                     covered=bool(entry.get("covered")),
                     test_steps=entry.get("test_cases", []),
+                    test_cases=entry.get("test_case_numbers", []),
                 )
             )
 
@@ -439,6 +451,7 @@ class ComplianceApp:
                     source_doc=req.source_doc,
                     covered=False,
                     test_steps=[],
+                    test_cases=[],
                 )
                 for req in self.requirements.values()
             ]
@@ -473,19 +486,21 @@ class ComplianceApp:
                 (r.stakeholder_id or "").lower(),
                 (r.req_id or "").lower(),
                 r.covered,
+                ", ".join(r.test_cases).lower() if r.test_cases else "",
                 ", ".join(r.test_steps).lower() if r.test_steps else "",
             ),
         )
         for res in rows:
             iid = self._coverage_row_key(res)
             covered = "YES" if res.covered else "NO"
+            cases = self._format_test_case_label(res.test_cases)
             steps = ", ".join(res.test_steps) if res.test_steps else "-"
             tag = self.coverage_row_colors.get(iid)
             self.coverage_tree.insert(
                 "",
                 tk.END,
                 iid=iid,
-                values=(res.stakeholder_id or "", res.req_id, covered, steps, res.source_doc),
+                values=(res.stakeholder_id or "", res.req_id, covered, cases, steps, res.source_doc),
                 tags=([tag] if tag else []),
             )
 
@@ -525,6 +540,31 @@ class ComplianceApp:
         self.coverage_row_colors.pop(row_id, None)
         if self.coverage_tree.exists(row_id):
             self.coverage_tree.item(row_id, tags=[])
+
+    @staticmethod
+    def _normalize_test_case_label(label: str) -> str:
+        normalized = " ".join((label or "").strip().split())
+        if not normalized:
+            return normalized
+        if normalized.lower().startswith("test case"):
+            return normalized
+        return f"Test Case {normalized}"
+
+    def _format_test_case_label(self, labels: List[str]) -> str:
+        if not labels:
+            return "-"
+        normalized = [self._normalize_test_case_label(c) for c in labels if c]
+        if not normalized:
+            return "-"
+        normalized = sorted(set(normalized), key=self._test_case_sort_key)
+        return normalized[0]
+
+    @staticmethod
+    def _test_case_sort_key(label: str) -> tuple:
+        match = re.search(r"test case\s+(\d+)", label, re.IGNORECASE)
+        if match:
+            return (0, int(match.group(1)), label.lower())
+        return (1, 10**9, label.lower())
 
     def _refresh_orphans(self) -> None:
         for item in self.orphan_tree.get_children():

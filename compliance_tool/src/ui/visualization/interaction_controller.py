@@ -76,6 +76,8 @@ def build_view1_data(
         })
 
     for tc in test_cases:
+        if not tc.ts_id:
+            continue
         if tc.ref_id not in filtered_req_ids:
             continue
         req_node = f"system:{tc.ref_id}"
@@ -121,6 +123,8 @@ def build_view2_data(
             links[key].value += 1
 
     for tc in test_cases:
+        if not tc.ts_id:
+            continue
         if test_case_id(tc.ts_id) != selected_test_case:
             continue
         if tc.ref_id not in filtered_req_ids:

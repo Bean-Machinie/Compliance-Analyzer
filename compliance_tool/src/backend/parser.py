@@ -13,6 +13,18 @@ ID_PATTERN = re.compile(
     r"[#\[\(]?\s*(?P<id>(?:BNC|DLS|NSE|BNCS|DLSS|NSES)\d+)\s*[\]\)]?"
 )
 TS_PATTERN = re.compile(r"^\d+(?:\.\d+)*$")
+TEST_CASE_PATTERN = re.compile(
+    r"^\s*(?P<section>\d+(?:\.\d+)*)\s+test\s*case\s*(?P<tcnum>\d+)?\s*:?\s*(?P<title>.*)$",
+    re.IGNORECASE,
+)
+
+
+def _is_section(text: str, targets: Iterable[str]) -> bool:
+    normalized = " ".join((text or "").strip().lower().split())
+    if normalized in targets:
+        return True
+    stripped = re.sub(r"^[\d\.]+\s*", "", normalized)
+    return stripped in targets
 
 
 def _extract_ids(text: str) -> List[str]:
@@ -90,6 +102,61 @@ def parse_test_procedures(doc_path: str, source_label: Optional[str] = None) -> 
     test_cases: List[TestCase] = []
     source_doc = source_label or doc_path
 
+    tc_requirements = {}
+    tc_titles = {}
+    current_tc: Optional[str] = None
+    in_requirements = False
+
+    for para in doc.paragraphs:
+        text = (para.text or "").strip()
+        if not text:
+            continue
+
+        tc_match = TEST_CASE_PATTERN.match(text)
+        if tc_match:
+            tc_num = tc_match.group("tcnum") or tc_match.group("section")
+            current_tc = tc_num
+            title = (tc_match.group("title") or "").strip()
+            if title:
+                tc_titles[tc_num] = title
+            in_requirements = False
+            continue
+
+        if _is_section(text, {"requirements", "requirement"}):
+            in_requirements = current_tc is not None
+            continue
+
+        if _is_section(
+            text,
+            {
+                "test execution",
+                "test steps",
+                "test procedure",
+                "test execution steps",
+                "comments",
+            },
+        ):
+            in_requirements = False
+            continue
+
+        if in_requirements and current_tc:
+            ids = _extract_ids(text)
+            if ids:
+                tc_requirements.setdefault(current_tc, set()).update(ids)
+
+    for tc_id, ids in tc_requirements.items():
+        title = tc_titles.get(tc_id)
+        for ref_id in sorted(ids):
+            test_cases.append(
+                TestCase(
+                    ts_id="",
+                    ref_id=ref_id,
+                    source_doc=source_doc,
+                    test_case_id=tc_id,
+                    test_case_title=title,
+                )
+            )
+
     for table in doc.tables:
         header_idx = None
         header_cols = None
@@ -121,7 +188,17 @@ def parse_test_procedures(doc_path: str, source_label: Optional[str] = None) -> 
             ids = _extract_ids(ref_val)
             if not ids:
                 continue
+            tc_id = ts_val.split(".", 1)[0]
+            title = tc_titles.get(tc_id)
             for ref_id in ids:
-                test_cases.append(TestCase(ts_id=ts_val, ref_id=ref_id, source_doc=source_doc))
+                test_cases.append(
+                    TestCase(
+                        ts_id=ts_val,
+                        ref_id=ref_id,
+                        source_doc=source_doc,
+                        test_case_id=tc_id,
+                        test_case_title=title,
+                    )
+                )
 
     return test_cases
