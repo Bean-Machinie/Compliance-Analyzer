@@ -86,10 +86,51 @@ class ComplianceApp:
 
     def _build_coverage_tab(self) -> None:
         frame = labeled_frame(self.coverage_frame, "Requirement Coverage")
+        filters = ttk.Frame(frame)
+        filters.pack(fill="x", padx=6, pady=4)
+
+        self.coverage_filter_vars = {
+            "stakeholder": tk.StringVar(),
+            "requirement": tk.StringVar(),
+            "covered": tk.StringVar(value="All"),
+            "linked": tk.StringVar(),
+        }
+
+        ttk.Label(filters, text="Stakeholder ID").grid(row=0, column=0, sticky="w", padx=4, pady=2)
+        ttk.Entry(filters, textvariable=self.coverage_filter_vars["stakeholder"], width=16).grid(
+            row=0, column=1, sticky="w", padx=4, pady=2
+        )
+
+        ttk.Label(filters, text="Requirement ID").grid(row=0, column=2, sticky="w", padx=4, pady=2)
+        ttk.Entry(filters, textvariable=self.coverage_filter_vars["requirement"], width=16).grid(
+            row=0, column=3, sticky="w", padx=4, pady=2
+        )
+
+        ttk.Label(filters, text="Covered").grid(row=0, column=4, sticky="w", padx=4, pady=2)
+        ttk.Combobox(
+            filters,
+            textvariable=self.coverage_filter_vars["covered"],
+            values=["All", "YES", "NO"],
+            state="readonly",
+            width=8,
+        ).grid(row=0, column=5, sticky="w", padx=4, pady=2)
+
+        ttk.Label(filters, text="Linked Test Cases").grid(row=0, column=6, sticky="w", padx=4, pady=2)
+        ttk.Entry(filters, textvariable=self.coverage_filter_vars["linked"], width=18).grid(
+            row=0, column=7, sticky="w", padx=4, pady=2
+        )
+
+        ttk.Button(filters, text="Clear Filters", command=self._clear_coverage_filters).grid(
+            row=0, column=8, sticky="w", padx=6, pady=2
+        )
+
+        for var in self.coverage_filter_vars.values():
+            var.trace_add("write", lambda *_: self._refresh_coverage())
+
         self.coverage_tree = make_tree(
             frame,
-            columns=["req_id", "stakeholder", "covered", "test_steps", "source_doc"],
-            headings=["Requirement ID", "Stakeholder ID", "Covered", "Linked Test Cases", "Source Document"],
+            columns=["stakeholder", "req_id", "covered", "test_steps", "source_doc"],
+            headings=["Stakeholder ID", "Requirement ID", "Covered", "Linked Test Cases", "Source Document"],
         )
 
     def _build_orphan_tab(self) -> None:
@@ -378,14 +419,55 @@ class ComplianceApp:
                 )
                 for req in self.requirements.values()
             ]
+        filters = getattr(self, "coverage_filter_vars", None)
+        if filters:
+            stakeholder_filter = filters["stakeholder"].get().strip().lower()
+            req_filter = filters["requirement"].get().strip().lower()
+            covered_filter = filters["covered"].get().strip().upper()
+            linked_filter = filters["linked"].get().strip().lower()
+
+            def _matches(res: AnalysisResult) -> bool:
+                stakeholder_val = (res.stakeholder_id or "").lower()
+                req_val = (res.req_id or "").lower()
+                covered_val = "YES" if res.covered else "NO"
+                linked_val = ", ".join(res.test_steps).lower() if res.test_steps else ""
+
+                if stakeholder_filter and stakeholder_filter not in stakeholder_val:
+                    return False
+                if req_filter and req_filter not in req_val:
+                    return False
+                if covered_filter in ("YES", "NO") and covered_val != covered_filter:
+                    return False
+                if linked_filter and linked_filter not in linked_val:
+                    return False
+                return True
+
+            rows = [r for r in rows if _matches(r)]
+
+        rows = sorted(
+            rows,
+            key=lambda r: (
+                (r.stakeholder_id or "").lower(),
+                (r.req_id or "").lower(),
+                r.covered,
+                ", ".join(r.test_steps).lower() if r.test_steps else "",
+            ),
+        )
         for res in rows:
             covered = "YES" if res.covered else "NO"
             steps = ", ".join(res.test_steps) if res.test_steps else "-"
             self.coverage_tree.insert(
                 "",
                 tk.END,
-                values=(res.req_id, res.stakeholder_id or "", covered, steps, res.source_doc),
+                values=(res.stakeholder_id or "", res.req_id, covered, steps, res.source_doc),
             )
+
+    def _clear_coverage_filters(self) -> None:
+        for key, var in self.coverage_filter_vars.items():
+            if key == "covered":
+                var.set("All")
+            else:
+                var.set("")
 
     def _refresh_orphans(self) -> None:
         for item in self.orphan_tree.get_children():
