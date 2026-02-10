@@ -10,7 +10,7 @@ REQ_PREFIXES_SYSTEM = ("BNC", "DLS", "NSE")
 REQ_PREFIXES_STAKEHOLDER = ("BNCS", "DLSS", "NSES")
 
 ID_PATTERN = re.compile(
-    r"[#\[\(]?\s*(?P<id>(?:BNC|DLS|NSE|BNCS|DLSS|NSES)\s*-?\s*\d+)\s*[\]\)]?"
+    r"[#\[\(]?\s*(?P<id>(?:BNCS|DLSS|NSES|BNC|DLS|NSE)\s*-?\s*\d+)\s*[\]\)]?"
 )
 TS_PATTERN = re.compile(r"^\d+(?:\.\d+)*$")
 TEST_CASE_PATTERN = re.compile(
@@ -69,7 +69,7 @@ def parse_requirements(doc_path: str, source_label: Optional[str] = None) -> Lis
     source_doc = source_label or doc_path
 
     def add_system_ids(ids: List[str], stakeholder: Optional[str]) -> None:
-        system_ids = [i for i in ids if i.startswith(REQ_PREFIXES_SYSTEM)]
+        system_ids = [i for i in ids if i.startswith(REQ_PREFIXES_SYSTEM) and not i.startswith(REQ_PREFIXES_STAKEHOLDER)]
         for req_id in system_ids:
             key = (req_id, stakeholder, doc_path)
             if key in seen:
