@@ -1,8 +1,39 @@
+
 import os
 import re
-from typing import List, Set
-import tkinter as tk
-from tkinter import filedialog, messagebox, simpledialog, ttk
+from collections import defaultdict
+from dataclasses import dataclass
+from typing import Dict, List, Optional, Sequence, Set
+
+from PySide6.QtCore import QAbstractTableModel, QModelIndex, QObject, Qt, QSortFilterProxyModel
+from PySide6.QtGui import QAction, QCloseEvent, QStandardItem, QStandardItemModel
+from PySide6.QtWidgets import (
+    QApplication,
+    QComboBox,
+    QDialog,
+    QFileDialog,
+    QFormLayout,
+    QFrame,
+    QGridLayout,
+    QHBoxLayout,
+    QInputDialog,
+    QLabel,
+    QLineEdit,
+    QListWidget,
+    QMainWindow,
+    QMenuBar,
+    QMessageBox,
+    QPushButton,
+    QPlainTextEdit,
+    QStatusBar,
+    QTabWidget,
+    QTableView,
+    QTextEdit,
+    QTreeView,
+    QVBoxLayout,
+    QWidget,
+    QDockWidget,
+)
 
 from src.backend.analysis_engine import analyze
 from src.backend.document_manager import DocumentManager
@@ -11,216 +42,639 @@ from src.backend.models import AnalysisResult, OrphanReference, Requirement, Tes
 from src.backend.parser import parse_requirements, parse_test_procedures
 from src.backend.project_manager import ProjectManager
 from src.ui.command_controller import CommandController
-from src.ui.components import labeled_frame, make_tree
 from src.utils.logger import get_logger
 
+ROLE_PAYLOAD = Qt.UserRole + 1
 
-class ComplianceApp:
-    def __init__(self, root: tk.Tk):
-        self.root = root
-        self.root.title("Compliance Analyzer - Phase 3")
+
+@dataclass
+class GlobalFilterState:
+    stakeholder: str = ""
+    requirement: str = ""
+    test_case: str = ""
+    coverage: str = "All"
+    prefix: str = ""
+
+
+def _norm(value: str) -> str:
+    return (value or "").strip().lower()
+
+
+def _matches_substring(filter_text: str, value: str) -> bool:
+    return not filter_text or filter_text in (value or "").lower()
+
+
+def _matches_prefix(prefix_filter: str, values: Sequence[str]) -> bool:
+    if not prefix_filter:
+        return True
+    for value in values:
+        if (value or "").lower().startswith(prefix_filter):
+            return True
+    return False
+
+
+class RequirementsMatrixModel(QAbstractTableModel):
+    HEADERS = [
+        "Stakeholder ID",
+        "Requirement ID",
+        "Coverage",
+        "Test Case Number",
+        "Linked Test Steps",
+        "Source Document",
+    ]
+
+    def __init__(self, parent: Optional[QObject] = None):
+        super().__init__(parent)
+        self._rows: List[AnalysisResult] = []
+
+    def set_rows(self, rows: List[AnalysisResult]) -> None:
+        self.beginResetModel()
+        self._rows = list(rows)
+        self.endResetModel()
+
+    def rowCount(self, parent: QModelIndex = QModelIndex()) -> int:
+        if parent.isValid():
+            return 0
+        return len(self._rows)
+
+    def columnCount(self, parent: QModelIndex = QModelIndex()) -> int:
+        return len(self.HEADERS)
+
+    def headerData(self, section: int, orientation: Qt.Orientation, role: int = Qt.DisplayRole):
+        if role != Qt.DisplayRole:
+            return None
+        if orientation == Qt.Horizontal:
+            return self.HEADERS[section]
+        return str(section + 1)
+
+    def data(self, index: QModelIndex, role: int = Qt.DisplayRole):
+        if not index.isValid():
+            return None
+        row = self._rows[index.row()]
+        if role == ROLE_PAYLOAD:
+            return row
+        if role != Qt.DisplayRole:
+            return None
+        col = index.column()
+        if col == 0:
+            return row.stakeholder_id or ""
+        if col == 1:
+            return row.req_id
+        if col == 2:
+            return "YES" if row.covered else "NO"
+        if col == 3:
+            return self._format_test_case_label(row.test_cases)
+        if col == 4:
+            return ", ".join(row.test_steps) if row.test_steps else "-"
+        if col == 5:
+            return row.source_doc
+        return None
+
+    def sort(self, column: int, order: Qt.SortOrder = Qt.AscendingOrder) -> None:
+        reverse = order == Qt.DescendingOrder
+        self.layoutAboutToBeChanged.emit()
+        self._rows.sort(key=lambda row: self._sort_key(row, column), reverse=reverse)
+        self.layoutChanged.emit()
+
+    def row_at(self, row: int) -> Optional[AnalysisResult]:
+        if row < 0 or row >= len(self._rows):
+            return None
+        return self._rows[row]
+
+    @staticmethod
+    def _sort_key(row: AnalysisResult, column: int):
+        if column == 0:
+            return _norm(row.stakeholder_id or "")
+        if column == 1:
+            return _norm(row.req_id)
+        if column == 2:
+            return 0 if row.covered else 1
+        if column == 3:
+            first = RequirementsMatrixModel._format_test_case_label(row.test_cases)
+            return RequirementsMatrixModel._test_case_sort_key(first)
+        if column == 4:
+            return _norm(", ".join(row.test_steps))
+        if column == 5:
+            return _norm(row.source_doc)
+        return ""
+
+    @staticmethod
+    def _normalize_test_case_label(label: str) -> str:
+        normalized = " ".join((label or "").strip().split())
+        if not normalized:
+            return normalized
+        if normalized.lower().startswith("test case"):
+            return normalized
+        return f"Test Case {normalized}"
+
+    @classmethod
+    def _format_test_case_label(cls, labels: List[str]) -> str:
+        if not labels:
+            return "-"
+        normalized = [cls._normalize_test_case_label(c) for c in labels if c]
+        if not normalized:
+            return "-"
+        normalized = sorted(set(normalized), key=cls._test_case_sort_key)
+        return normalized[0]
+
+    @staticmethod
+    def _test_case_sort_key(label: str) -> tuple:
+        match = re.search(r"test case\s+(\d+)", label, re.IGNORECASE)
+        if match:
+            return (0, int(match.group(1)), label.lower())
+        return (1, 10**9, label.lower())
+
+
+class OrphanModel(QAbstractTableModel):
+    HEADERS = ["Test Step ID", "Referenced Requirement", "Test Document"]
+
+    def __init__(self, parent: Optional[QObject] = None):
+        super().__init__(parent)
+        self._rows: List[OrphanReference] = []
+
+    def set_rows(self, rows: List[OrphanReference]) -> None:
+        self.beginResetModel()
+        self._rows = list(rows)
+        self.endResetModel()
+
+    def rowCount(self, parent: QModelIndex = QModelIndex()) -> int:
+        if parent.isValid():
+            return 0
+        return len(self._rows)
+
+    def columnCount(self, parent: QModelIndex = QModelIndex()) -> int:
+        return len(self.HEADERS)
+
+    def headerData(self, section: int, orientation: Qt.Orientation, role: int = Qt.DisplayRole):
+        if role != Qt.DisplayRole:
+            return None
+        if orientation == Qt.Horizontal:
+            return self.HEADERS[section]
+        return str(section + 1)
+
+    def data(self, index: QModelIndex, role: int = Qt.DisplayRole):
+        if not index.isValid():
+            return None
+        row = self._rows[index.row()]
+        if role == ROLE_PAYLOAD:
+            return row
+        if role != Qt.DisplayRole:
+            return None
+        if index.column() == 0:
+            return row.ts_id
+        if index.column() == 1:
+            return row.ref_id
+        if index.column() == 2:
+            return row.source_doc
+        return None
+
+    def sort(self, column: int, order: Qt.SortOrder = Qt.AscendingOrder) -> None:
+        reverse = order == Qt.DescendingOrder
+        self.layoutAboutToBeChanged.emit()
+        self._rows.sort(
+            key=lambda row: (
+                _norm(row.ts_id) if column == 0 else _norm(row.ref_id) if column == 1 else _norm(row.source_doc)
+            ),
+            reverse=reverse,
+        )
+        self.layoutChanged.emit()
+
+    def row_at(self, row: int) -> Optional[OrphanReference]:
+        if row < 0 or row >= len(self._rows):
+            return None
+        return self._rows[row]
+
+
+class StakeholderOverviewModel(QAbstractTableModel):
+    HEADERS = [
+        "Stakeholder ID",
+        "Requirements",
+        "Covered",
+        "Uncovered",
+        "Coverage %",
+        "Linked Test Cases",
+    ]
+
+    def __init__(self, parent: Optional[QObject] = None):
+        super().__init__(parent)
+        self._rows: List[dict] = []
+
+    def set_rows(self, rows: List[dict]) -> None:
+        self.beginResetModel()
+        self._rows = rows
+        self.endResetModel()
+
+    def rowCount(self, parent: QModelIndex = QModelIndex()) -> int:
+        if parent.isValid():
+            return 0
+        return len(self._rows)
+
+    def columnCount(self, parent: QModelIndex = QModelIndex()) -> int:
+        return len(self.HEADERS)
+
+    def headerData(self, section: int, orientation: Qt.Orientation, role: int = Qt.DisplayRole):
+        if role != Qt.DisplayRole:
+            return None
+        if orientation == Qt.Horizontal:
+            return self.HEADERS[section]
+        return str(section + 1)
+
+    def data(self, index: QModelIndex, role: int = Qt.DisplayRole):
+        if not index.isValid():
+            return None
+        row = self._rows[index.row()]
+        if role == ROLE_PAYLOAD:
+            return row
+        if role != Qt.DisplayRole:
+            return None
+        col = index.column()
+        if col == 0:
+            return row["stakeholder_id"]
+        if col == 1:
+            return row["requirements"]
+        if col == 2:
+            return row["covered"]
+        if col == 3:
+            return row["uncovered"]
+        if col == 4:
+            return f"{row['coverage_pct']:.2f}%"
+        if col == 5:
+            return ", ".join(row["test_cases"]) if row["test_cases"] else "-"
+        return None
+
+    def sort(self, column: int, order: Qt.SortOrder = Qt.AscendingOrder) -> None:
+        reverse = order == Qt.DescendingOrder
+        self.layoutAboutToBeChanged.emit()
+        self._rows.sort(
+            key=lambda row: (
+                _norm(row["stakeholder_id"])
+                if column == 0
+                else row["requirements"]
+                if column == 1
+                else row["covered"]
+                if column == 2
+                else row["uncovered"]
+                if column == 3
+                else row["coverage_pct"]
+                if column == 4
+                else _norm(", ".join(row["test_cases"]))
+            ),
+            reverse=reverse,
+        )
+        self.layoutChanged.emit()
+
+    def row_at(self, row: int) -> Optional[dict]:
+        if row < 0 or row >= len(self._rows):
+            return None
+        return self._rows[row]
+
+
+class GlobalFilterProxy(QSortFilterProxyModel):
+    def __init__(self, view_name: str, parent: Optional[QObject] = None):
+        super().__init__(parent)
+        self.view_name = view_name
+        self.state = GlobalFilterState()
+        self.setDynamicSortFilter(True)
+        self.setRecursiveFilteringEnabled(True)
+
+    def set_filter_state(self, state: GlobalFilterState) -> None:
+        self.state = state
+        self.invalidateFilter()
+
+    def filterAcceptsRow(self, source_row: int, source_parent: QModelIndex) -> bool:
+        model = self.sourceModel()
+        if model is None:
+            return True
+
+        if self.view_name == "explorer":
+            if source_parent.isValid():
+                return True
+            index = model.index(source_row, 0, source_parent)
+            payload = index.data(ROLE_PAYLOAD) or {}
+            return self._matches_payload(payload)
+
+        row_obj = None
+        if hasattr(model, "row_at"):
+            row_obj = model.row_at(source_row)
+        if row_obj is None:
+            return True
+        payload = self._payload_from_row(row_obj)
+        return self._matches_payload(payload)
+
+    def _payload_from_row(self, row_obj) -> dict:
+        if self.view_name == "requirements":
+            return {
+                "stakeholder": row_obj.stakeholder_id or "",
+                "requirement": row_obj.req_id or "",
+                "test_case": " ".join(row_obj.test_cases or []),
+                "coverage": "YES" if row_obj.covered else "NO",
+                "prefix_values": [row_obj.req_id, row_obj.stakeholder_id] + list(row_obj.test_steps) + list(row_obj.test_cases),
+            }
+        if self.view_name == "orphans":
+            return {
+                "stakeholder": "",
+                "requirement": row_obj.ref_id or "",
+                "test_case": row_obj.ts_id or "",
+                "coverage": "NO",
+                "prefix_values": [row_obj.ref_id, row_obj.ts_id],
+            }
+        if self.view_name == "stakeholders":
+            return {
+                "stakeholder": row_obj["stakeholder_id"],
+                "requirement": " ".join(row_obj["requirement_ids"]),
+                "test_case": " ".join(row_obj["test_cases"]),
+                "coverage": "YES" if row_obj["uncovered"] == 0 else "NO",
+                "prefix_values": [row_obj["stakeholder_id"]] + row_obj["requirement_ids"] + row_obj["test_cases"],
+            }
+        return {}
+
+    def _matches_payload(self, payload: dict) -> bool:
+        stakeholder_filter = _norm(self.state.stakeholder)
+        requirement_filter = _norm(self.state.requirement)
+        test_case_filter = _norm(self.state.test_case)
+        coverage_filter = (self.state.coverage or "All").upper()
+        prefix_filter = _norm(self.state.prefix)
+
+        if not _matches_substring(stakeholder_filter, payload.get("stakeholder", "")):
+            return False
+        if not _matches_substring(requirement_filter, payload.get("requirement", "")):
+            return False
+        if not _matches_substring(test_case_filter, payload.get("test_case", "")):
+            return False
+        if coverage_filter in ("YES", "NO") and payload.get("coverage", "All").upper() != coverage_filter:
+            return False
+        if not _matches_prefix(prefix_filter, payload.get("prefix_values", [])):
+            return False
+        return True
+
+
+class ComplianceApp(QMainWindow):
+    def __init__(self):
+        super().__init__()
         self.logger = get_logger(self.__class__.__name__)
-
         self.base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
         self.doc_manager = DocumentManager(self.base_dir)
         self.project_manager = ProjectManager(self.base_dir)
         self.commands = CommandController(self)
 
-        self.requirements = {}
-        self.test_cases = []
-        self.results = []
-        self.orphans = []
-        self.summary = {}
-        self.dirty = False
-        self.coverage_row_colors = {}
-        self._coverage_menu_iid = None
+        self.requirements: Dict[str, Requirement] = {}
+        self.test_cases: List[TestCase] = []
+        self.results: List[AnalysisResult] = []
+        self.orphans: List[OrphanReference] = []
+        self.summary: dict = {}
         self.config_requirements: Set[str] = set()
+        self.dirty = False
 
         self._build_ui()
         self._update_title()
-        self.root.protocol("WM_DELETE_WINDOW", self.handle_exit)
+        self._refresh_all_views()
 
     def _build_ui(self) -> None:
-        self.root.geometry("1120x760")
-        self.root.minsize(980, 700)
-
+        self.resize(1240, 820)
+        self.setMinimumSize(1040, 720)
         self._build_menu()
 
-        toolbar = ttk.Frame(self.root, padding=6)
-        toolbar.pack(fill="x")
+        central = QWidget(self)
+        self.setCentralWidget(central)
+        layout = QVBoxLayout(central)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(8)
 
-        ttk.Button(toolbar, text="Add Requirement Docs", command=self.commands.add_requirements).pack(side="left", padx=4)
-        ttk.Button(toolbar, text="Add Test Procedure Docs", command=self.commands.add_tests).pack(side="left", padx=4)
-        ttk.Button(toolbar, text="Run Analysis", command=self.commands.run_analysis).pack(side="left", padx=4)
-        ttk.Button(toolbar, text="Config Requirements", command=self._open_config_requirements).pack(
-            side="left", padx=4
-        )
+        toolbar = QHBoxLayout()
+        buttons = [
+            ("Add Requirement Docs", self.commands.add_requirements),
+            ("Add Test Procedure Docs", self.commands.add_tests),
+            ("Run Analysis", self.commands.run_analysis),
+            ("Config Requirements", self._open_config_requirements),
+        ]
+        for text, callback in buttons:
+            btn = QPushButton(text)
+            btn.clicked.connect(callback)
+            toolbar.addWidget(btn)
+        toolbar.addStretch()
+        layout.addLayout(toolbar)
 
-        self.status_var = tk.StringVar(value="Ready")
-        ttk.Label(self.root, textvariable=self.status_var, anchor="w").pack(fill="x", padx=8, pady=2)
+        filter_panel = QFrame()
+        filter_grid = QGridLayout(filter_panel)
+        filter_grid.setContentsMargins(8, 6, 8, 6)
+        filter_grid.setHorizontalSpacing(10)
+        self.filter_stakeholder = QLineEdit()
+        self.filter_requirement = QLineEdit()
+        self.filter_test_case = QLineEdit()
+        self.filter_coverage = QComboBox()
+        self.filter_coverage.addItems(["All", "YES", "NO"])
+        self.filter_prefix = QLineEdit()
+        clear_btn = QPushButton("Clear Filters")
+        clear_btn.clicked.connect(self._clear_global_filters)
 
-        notebook = ttk.Notebook(self.root)
-        notebook.pack(fill="both", expand=True)
+        fields = [
+            ("Stakeholder ID", self.filter_stakeholder),
+            ("Requirement ID", self.filter_requirement),
+            ("Test Case Number", self.filter_test_case),
+            ("Coverage Status", self.filter_coverage),
+            ("Prefix", self.filter_prefix),
+        ]
+        for i, (label, widget) in enumerate(fields):
+            filter_grid.addWidget(QLabel(label), 0, i * 2)
+            filter_grid.addWidget(widget, 0, i * 2 + 1)
+        filter_grid.addWidget(clear_btn, 0, len(fields) * 2)
+        layout.addWidget(filter_panel)
 
-        self.coverage_frame = ttk.Frame(notebook)
-        self.orphan_frame = ttk.Frame(notebook)
-        self.summary_frame = ttk.Frame(notebook)
+        self.tabs = QTabWidget()
+        layout.addWidget(self.tabs, 1)
 
-        notebook.add(self.coverage_frame, text="Requirements Coverage")
-        notebook.add(self.orphan_frame, text="Orphan Test References")
-        notebook.add(self.summary_frame, text="Summary")
+        self.test_case_tab = QWidget()
+        self.requirements_tab = QWidget()
+        self.stakeholder_tab = QWidget()
+        self.orphan_tab = QWidget()
+        self.summary_tab = QWidget()
 
-        self._build_coverage_tab()
+        self.tabs.addTab(self.test_case_tab, "Test Case Explorer")
+        self.tabs.addTab(self.requirements_tab, "Requirements Matrix")
+        self.tabs.addTab(self.stakeholder_tab, "Stakeholder Overview")
+        self.tabs.addTab(self.orphan_tab, "Orphan Test References")
+        self.tabs.addTab(self.summary_tab, "Summary Dashboard")
+        self.tabs.setCurrentIndex(0)
+
+        self._build_test_case_tab()
+        self._build_requirements_tab()
+        self._build_stakeholder_tab()
         self._build_orphan_tab()
         self._build_summary_tab()
 
+        self.detail_dock = QDockWidget("Details", self)
+        self.detail_dock.setAllowedAreas(Qt.RightDockWidgetArea | Qt.LeftDockWidgetArea)
+        self.detail_text = QTextEdit()
+        self.detail_text.setReadOnly(True)
+        self.detail_dock.setWidget(self.detail_text)
+        self.addDockWidget(Qt.RightDockWidgetArea, self.detail_dock)
+
+        status = QStatusBar(self)
+        self.setStatusBar(status)
+        self.statusBar().showMessage("Ready")
+
+        self.filter_stakeholder.textChanged.connect(self._apply_global_filters)
+        self.filter_requirement.textChanged.connect(self._apply_global_filters)
+        self.filter_test_case.textChanged.connect(self._apply_global_filters)
+        self.filter_coverage.currentTextChanged.connect(self._apply_global_filters)
+        self.filter_prefix.textChanged.connect(self._apply_global_filters)
+        self.tabs.currentChanged.connect(lambda _: self._update_detail_for_current_tab())
+
     def _build_menu(self) -> None:
-        menubar = tk.Menu(self.root)
-        file_menu = tk.Menu(menubar, tearoff=0)
-        file_menu.add_command(label="New Project", command=self.commands.new_project)
-        file_menu.add_command(label="Open Project", command=self.commands.open_project)
-        file_menu.add_command(label="Save Project", command=self.commands.save_project)
-        file_menu.add_command(label="Save Project As", command=self.commands.save_project_as)
-        file_menu.add_separator()
-        file_menu.add_command(label="Export Analysis to CSV", command=self.commands.export_csv)
-        file_menu.add_separator()
-        file_menu.add_command(label="Exit", command=self.commands.exit_app)
-        menubar.add_cascade(label="File", menu=file_menu)
-        self.root.config(menu=menubar)
+        menubar = QMenuBar(self)
+        self.setMenuBar(menubar)
+        file_menu = menubar.addMenu("File")
 
-    def _build_coverage_tab(self) -> None:
-        frame = labeled_frame(self.coverage_frame, "Requirement Coverage")
-        filters = ttk.Frame(frame)
-        filters.pack(fill="x", padx=6, pady=4)
+        actions = [
+            ("New Project", self.commands.new_project),
+            ("Open Project", self.commands.open_project),
+            ("Save Project", self.commands.save_project),
+            ("Save Project As", self.commands.save_project_as),
+            ("Export Analysis to CSV", self.commands.export_csv),
+            ("Exit", self.commands.exit_app),
+        ]
+        for i, (label, callback) in enumerate(actions):
+            if i in (4, 5):
+                file_menu.addSeparator()
+            action = QAction(label, self)
+            action.triggered.connect(callback)
+            file_menu.addAction(action)
 
-        self.coverage_filter_vars = {
-            "stakeholder": tk.StringVar(),
-            "requirement": tk.StringVar(),
-            "covered": tk.StringVar(value="All"),
-            "linked": tk.StringVar(),
-        }
-
-        ttk.Label(filters, text="Stakeholder ID").grid(row=0, column=0, sticky="w", padx=4, pady=2)
-        ttk.Entry(filters, textvariable=self.coverage_filter_vars["stakeholder"], width=16).grid(
-            row=0, column=1, sticky="w", padx=4, pady=2
+    def _build_test_case_tab(self) -> None:
+        layout = QVBoxLayout(self.test_case_tab)
+        self.test_case_model = QStandardItemModel()
+        self.test_case_model.setHorizontalHeaderLabels(
+            ["Test Case", "Step Count", "Linked Requirements", "Covered", "Source Documents"]
         )
+        self.test_case_proxy = GlobalFilterProxy("explorer", self)
+        self.test_case_proxy.setSourceModel(self.test_case_model)
 
-        ttk.Label(filters, text="Requirement ID").grid(row=0, column=2, sticky="w", padx=4, pady=2)
-        ttk.Entry(filters, textvariable=self.coverage_filter_vars["requirement"], width=16).grid(
-            row=0, column=3, sticky="w", padx=4, pady=2
-        )
+        self.test_case_view = QTreeView()
+        self.test_case_view.setModel(self.test_case_proxy)
+        self.test_case_view.setSortingEnabled(True)
+        self.test_case_view.setAlternatingRowColors(True)
+        self.test_case_view.setRootIsDecorated(True)
+        self.test_case_view.expandToDepth(0)
+        self.test_case_view.selectionModel().selectionChanged.connect(self._on_test_case_selected)
+        layout.addWidget(self.test_case_view)
 
-        ttk.Label(filters, text="Covered").grid(row=0, column=4, sticky="w", padx=4, pady=2)
-        ttk.Combobox(
-            filters,
-            textvariable=self.coverage_filter_vars["covered"],
-            values=["All", "YES", "NO"],
-            state="readonly",
-            width=8,
-        ).grid(row=0, column=5, sticky="w", padx=4, pady=2)
+    def _build_requirements_tab(self) -> None:
+        layout = QVBoxLayout(self.requirements_tab)
+        self.requirements_model = RequirementsMatrixModel(self)
+        self.requirements_proxy = GlobalFilterProxy("requirements", self)
+        self.requirements_proxy.setSourceModel(self.requirements_model)
 
-        ttk.Label(filters, text="Linked Test Cases").grid(row=0, column=6, sticky="w", padx=4, pady=2)
-        ttk.Entry(filters, textvariable=self.coverage_filter_vars["linked"], width=18).grid(
-            row=0, column=7, sticky="w", padx=4, pady=2
-        )
+        self.requirements_view = QTableView()
+        self.requirements_view.setModel(self.requirements_proxy)
+        self.requirements_view.setSortingEnabled(True)
+        self.requirements_view.setSelectionBehavior(QTableView.SelectRows)
+        self.requirements_view.setAlternatingRowColors(True)
+        self.requirements_view.horizontalHeader().setStretchLastSection(True)
+        self.requirements_view.selectionModel().selectionChanged.connect(self._on_requirement_selected)
+        layout.addWidget(self.requirements_view)
 
-        ttk.Button(filters, text="Clear Filters", command=self._clear_coverage_filters).grid(
-            row=0, column=8, sticky="w", padx=6, pady=2
-        )
+    def _build_stakeholder_tab(self) -> None:
+        layout = QVBoxLayout(self.stakeholder_tab)
+        self.stakeholder_model = StakeholderOverviewModel(self)
+        self.stakeholder_proxy = GlobalFilterProxy("stakeholders", self)
+        self.stakeholder_proxy.setSourceModel(self.stakeholder_model)
 
-        for var in self.coverage_filter_vars.values():
-            var.trace_add("write", lambda *_: self._refresh_coverage())
-
-        self.coverage_tree = make_tree(
-            frame,
-            columns=["stakeholder", "req_id", "covered", "test_cases", "test_steps", "source_doc"],
-            headings=[
-                "Stakeholder ID",
-                "Requirement ID",
-                "Covered",
-                "Test Case Number",
-                "Linked Test Cases",
-                "Source Document",
-            ],
-        )
-        self._init_coverage_colors()
-
-    def _init_coverage_colors(self) -> None:
-        self.coverage_tree.tag_configure("color_red", background="#f5b7b1")
-        self.coverage_tree.tag_configure("color_yellow", background="#f9e79f")
-        self.coverage_tree.tag_configure("color_green", background="#abebc6")
-        self.coverage_tree.tag_configure("color_blue", background="#aed6f1")
-        self.coverage_tree.tag_configure("color_gray", background="#d5d8dc")
-
-        menu = tk.Menu(self.root, tearoff=0)
-        menu.add_command(label="Mark Red", command=lambda: self._set_coverage_row_color("color_red"))
-        menu.add_command(label="Mark Yellow", command=lambda: self._set_coverage_row_color("color_yellow"))
-        menu.add_command(label="Mark Green", command=lambda: self._set_coverage_row_color("color_green"))
-        menu.add_command(label="Mark Blue", command=lambda: self._set_coverage_row_color("color_blue"))
-        menu.add_command(label="Mark Gray", command=lambda: self._set_coverage_row_color("color_gray"))
-        menu.add_separator()
-        menu.add_command(label="Clear Color", command=self._clear_coverage_row_color)
-        self.coverage_menu = menu
-
-        self.coverage_tree.bind("<Button-3>", self._show_coverage_menu)
-        self.coverage_tree.bind("<Button-2>", self._show_coverage_menu)
+        self.stakeholder_view = QTableView()
+        self.stakeholder_view.setModel(self.stakeholder_proxy)
+        self.stakeholder_view.setSortingEnabled(True)
+        self.stakeholder_view.setSelectionBehavior(QTableView.SelectRows)
+        self.stakeholder_view.setAlternatingRowColors(True)
+        self.stakeholder_view.horizontalHeader().setStretchLastSection(True)
+        self.stakeholder_view.selectionModel().selectionChanged.connect(self._on_stakeholder_selected)
+        layout.addWidget(self.stakeholder_view)
 
     def _build_orphan_tab(self) -> None:
-        frame = labeled_frame(self.orphan_frame, "Orphan Test References")
-        self.orphan_tree = make_tree(
-            frame,
-            columns=["ts_id", "ref_id", "source_doc"],
-            headings=["Test Step ID", "Referenced Requirement", "Test Document"],
-        )
+        layout = QVBoxLayout(self.orphan_tab)
+        self.orphan_model = OrphanModel(self)
+        self.orphan_proxy = GlobalFilterProxy("orphans", self)
+        self.orphan_proxy.setSourceModel(self.orphan_model)
+
+        self.orphan_view = QTableView()
+        self.orphan_view.setModel(self.orphan_proxy)
+        self.orphan_view.setSortingEnabled(True)
+        self.orphan_view.setSelectionBehavior(QTableView.SelectRows)
+        self.orphan_view.setAlternatingRowColors(True)
+        self.orphan_view.horizontalHeader().setStretchLastSection(True)
+        self.orphan_view.selectionModel().selectionChanged.connect(self._on_orphan_selected)
+        layout.addWidget(self.orphan_view)
 
     def _build_summary_tab(self) -> None:
-        frame = labeled_frame(self.summary_frame, "Summary Dashboard")
-        self.summary_vars = {
-            "total_stakeholders": tk.StringVar(value="0"),
-            "total_requirements": tk.StringVar(value="0"),
-            "covered_requirements": tk.StringVar(value="0"),
-            "uncovered_requirements": tk.StringVar(value="0"),
-            "coverage_percent": tk.StringVar(value="0"),
+        layout = QVBoxLayout(self.summary_tab)
+        panel = QFrame()
+        form = QFormLayout(panel)
+        self.summary_labels = {
+            "total_stakeholders": QLabel("0"),
+            "total_requirements": QLabel("0"),
+            "covered_requirements": QLabel("0"),
+            "uncovered_requirements": QLabel("0"),
+            "coverage_percent": QLabel("0%"),
         }
+        form.addRow("Total Stakeholder Requirements", self.summary_labels["total_stakeholders"])
+        form.addRow("Total System Requirements", self.summary_labels["total_requirements"])
+        form.addRow("Covered Requirements", self.summary_labels["covered_requirements"])
+        form.addRow("Uncovered Requirements", self.summary_labels["uncovered_requirements"])
+        form.addRow("Coverage Percentage", self.summary_labels["coverage_percent"])
+        layout.addWidget(panel)
+        layout.addStretch()
 
-        rows = [
-            ("Total Stakeholder Requirements", "total_stakeholders"),
-            ("Total System Requirements", "total_requirements"),
-            ("Covered Requirements", "covered_requirements"),
-            ("Uncovered Requirements", "uncovered_requirements"),
-            ("Coverage Percentage", "coverage_percent"),
-        ]
+    def _current_filter_state(self) -> GlobalFilterState:
+        return GlobalFilterState(
+            stakeholder=self.filter_stakeholder.text(),
+            requirement=self.filter_requirement.text(),
+            test_case=self.filter_test_case.text(),
+            coverage=self.filter_coverage.currentText(),
+            prefix=self.filter_prefix.text(),
+        )
 
-        for i, (label, key) in enumerate(rows):
-            ttk.Label(frame, text=label).grid(row=i, column=0, sticky="w", padx=6, pady=6)
-            ttk.Label(frame, textvariable=self.summary_vars[key]).grid(row=i, column=1, sticky="w", padx=6, pady=6)
+    def _apply_global_filters(self) -> None:
+        state = self._current_filter_state()
+        self.requirements_proxy.set_filter_state(state)
+        self.orphan_proxy.set_filter_state(state)
+        self.stakeholder_proxy.set_filter_state(state)
+        self.test_case_proxy.set_filter_state(state)
+        self._refresh_summary()
+        self._update_detail_for_current_tab()
+
+    def _clear_global_filters(self) -> None:
+        self.filter_stakeholder.clear()
+        self.filter_requirement.clear()
+        self.filter_test_case.clear()
+        self.filter_prefix.clear()
+        self.filter_coverage.setCurrentText("All")
+        self._apply_global_filters()
 
     def _set_dirty(self, dirty: bool) -> None:
         self.dirty = dirty
         self._update_title()
 
     def _update_title(self) -> None:
-        name = self.project_manager.project_name
         suffix = " *" if self.dirty else ""
-        self.root.title(f"Compliance Analyzer - {name}{suffix}")
+        self.setWindowTitle(f"Compliance Analyzer - {self.project_manager.project_name}{suffix}")
 
     def handle_new_project(self) -> None:
         if not self._confirm_discard():
             return
-        name = simpledialog.askstring("New Project", "Project name:")
-        if name is None:
+        name, ok = QInputDialog.getText(self, "New Project", "Project name:")
+        if not ok:
             return
-        self.project_manager.new_project(name.strip() or "Untitled")
+        self.project_manager.new_project((name or "").strip() or "Untitled")
         self._reset_state()
         self._set_dirty(False)
-        self.status_var.set("New project created")
+        self.statusBar().showMessage("New project created")
 
     def handle_open_project(self) -> None:
         if not self._confirm_discard():
             return
-        filepath = filedialog.askopenfilename(
-            title="Open Compliance Project",
-            filetypes=[("Compliance Project", "*.compliance"), ("All Files", "*.*")],
+        filepath, _ = QFileDialog.getOpenFileName(
+            self,
+            "Open Compliance Project",
+            "",
+            "Compliance Project (*.compliance);;All Files (*.*)",
         )
         if not filepath:
             return
@@ -228,7 +682,7 @@ class ComplianceApp:
         payload, _ = self.project_manager.load_project(filepath)
         self._load_from_payload(payload)
         self._set_dirty(False)
-        self.status_var.set(f"Opened project {filepath}")
+        self.statusBar().showMessage(f"Opened project {filepath}")
 
     def handle_save_project(self) -> None:
         try:
@@ -248,13 +702,14 @@ class ComplianceApp:
             return
 
         self._set_dirty(False)
-        self.status_var.set(f"Saved project to {path}")
+        self.statusBar().showMessage(f"Saved project to {path}")
 
     def handle_save_project_as(self) -> None:
-        filepath = filedialog.asksaveasfilename(
-            title="Save Compliance Project",
-            defaultextension=".compliance",
-            filetypes=[("Compliance Project", "*.compliance")],
+        filepath, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save Compliance Project",
+            "",
+            "Compliance Project (*.compliance)",
         )
         if not filepath:
             return
@@ -271,12 +726,14 @@ class ComplianceApp:
             config_requirements=sorted(self.config_requirements),
         )
         self._set_dirty(False)
-        self.status_var.set(f"Saved project to {filepath}")
+        self.statusBar().showMessage(f"Saved project to {filepath}")
 
     def handle_add_requirements(self) -> None:
-        filepaths = filedialog.askopenfilenames(
-            title="Select Requirement Documents",
-            filetypes=[("Word Documents", "*.docx")],
+        filepaths, _ = QFileDialog.getOpenFileNames(
+            self,
+            "Select Requirement Documents",
+            "",
+            "Word Documents (*.docx)",
         )
         if not filepaths:
             return
@@ -291,17 +748,19 @@ class ComplianceApp:
                 added += 1
             except Exception as exc:
                 self.logger.exception("Failed to add requirement doc")
-                messagebox.showerror("Error", f"Failed to add {fp}: {exc}")
+                QMessageBox.critical(self, "Error", f"Failed to add {fp}: {exc}")
 
         if added:
             self._set_dirty(True)
         self._refresh_all_views()
-        self.status_var.set(f"Added {added} requirement document(s)")
+        self.statusBar().showMessage(f"Added {added} requirement document(s)")
 
     def handle_add_tests(self) -> None:
-        filepaths = filedialog.askopenfilenames(
-            title="Select Test Procedure Documents",
-            filetypes=[("Word Documents", "*.docx")],
+        filepaths, _ = QFileDialog.getOpenFileNames(
+            self,
+            "Select Test Procedure Documents",
+            "",
+            "Word Documents (*.docx)",
         )
         if not filepaths:
             return
@@ -315,45 +774,45 @@ class ComplianceApp:
                 added += 1
             except Exception as exc:
                 self.logger.exception("Failed to add test procedure doc")
-                messagebox.showerror("Error", f"Failed to add {fp}: {exc}")
+                QMessageBox.critical(self, "Error", f"Failed to add {fp}: {exc}")
 
         if added:
             self._set_dirty(True)
         self._refresh_all_views()
-        self.status_var.set(f"Added {added} test procedure document(s)")
+        self.statusBar().showMessage(f"Added {added} test procedure document(s)")
 
     def handle_run_analysis(self) -> None:
         if not self.requirements:
-            messagebox.showwarning("No Requirements", "Please add requirement documents first.")
+            QMessageBox.warning(self, "No Requirements", "Please add requirement documents first.")
             return
         if not self.test_cases:
-            messagebox.showwarning("No Tests", "Please add test procedure documents first.")
+            QMessageBox.warning(self, "No Tests", "Please add test procedure documents first.")
             return
 
         self._recompute_analysis()
         self._refresh_all_views()
         self._set_dirty(True)
-        self.status_var.set("Analysis complete")
+        self.statusBar().showMessage("Analysis complete")
 
     def handle_export_csv(self) -> None:
         if not self.results:
-            messagebox.showwarning("No Results", "Run analysis before exporting.")
+            QMessageBox.warning(self, "No Results", "Run analysis before exporting.")
             return
-        filepath = filedialog.asksaveasfilename(
-            title="Export Analysis to CSV",
-            defaultextension=".csv",
-            filetypes=[("CSV", "*.csv")],
-        )
+        filepath, _ = QFileDialog.getSaveFileName(self, "Export Analysis to CSV", "", "CSV (*.csv)")
         if not filepath:
             return
         export_analysis_csv(filepath, self.results)
-        self.status_var.set(f"Exported CSV to {filepath}")
+        self.statusBar().showMessage(f"Exported CSV to {filepath}")
 
     def handle_exit(self) -> None:
-        if not self._confirm_discard():
+        self.close()
+
+    def closeEvent(self, event: QCloseEvent) -> None:
+        if self._confirm_discard():
+            self.doc_manager.cleanup()
+            event.accept()
             return
-        self.doc_manager.cleanup()
-        self.root.destroy()
+        event.ignore()
 
     def _reset_state(self) -> None:
         self.requirements = {}
@@ -419,17 +878,101 @@ class ComplianceApp:
         self._refresh_all_views()
 
     def _refresh_all_views(self) -> None:
-        self._refresh_coverage()
+        self._refresh_requirements_matrix()
+        self._refresh_test_case_explorer()
+        self._refresh_stakeholders()
         self._refresh_orphans()
-        self._refresh_summary()
+        self._apply_global_filters()
 
-    def _refresh_coverage(self) -> None:
-        for item in self.coverage_tree.get_children():
-            self.coverage_tree.delete(item)
+    def _refresh_requirements_matrix(self) -> None:
+        rows = self.results if self.results else [
+            AnalysisResult(
+                req_id=req.req_id,
+                stakeholder_id=req.stakeholder_id,
+                source_doc=req.source_doc,
+                covered=False,
+                test_steps=[],
+                test_cases=[],
+            )
+            for req in self._active_requirements()
+        ]
+        rows = sorted(
+            rows,
+            key=lambda r: (
+                _norm(r.stakeholder_id or ""),
+                _norm(r.req_id),
+                0 if r.covered else 1,
+                _norm(", ".join(r.test_steps)),
+            ),
+        )
+        self.requirements_model.set_rows(rows)
+
+    def _refresh_test_case_explorer(self) -> None:
+        self.test_case_model.removeRows(0, self.test_case_model.rowCount())
+        grouped = defaultdict(list)
+        for tc in self.test_cases:
+            grouped[self._test_case_label(tc)].append(tc)
+
+        known_req_ids = {req.req_id for req in self._active_requirements()}
+        for test_case_label in sorted(grouped.keys(), key=lambda value: value.lower()):
+            members = grouped[test_case_label]
+            req_ids = sorted({tc.ref_id for tc in members if tc.ref_id})
+            stakeholder_ids = sorted(
+                {
+                    self.requirements[req_id].stakeholder_id
+                    for req_id in req_ids
+                    if req_id in self.requirements and self.requirements[req_id].stakeholder_id
+                }
+            )
+            steps = sorted({tc.ts_id for tc in members if tc.ts_id})
+            docs = sorted({tc.source_doc for tc in members if tc.source_doc})
+            covered = any(req_id in known_req_ids for req_id in req_ids)
+            coverage_text = "YES" if covered else "NO"
+
+            parent_items = [
+                QStandardItem(test_case_label),
+                QStandardItem(str(len(steps))),
+                QStandardItem(", ".join(req_ids) if req_ids else "-"),
+                QStandardItem(coverage_text),
+                QStandardItem(", ".join(docs) if docs else "-"),
+            ]
+
+            parent_items[0].setData(
+                {
+                    "stakeholder": ", ".join(stakeholder_ids),
+                    "requirement": ", ".join(req_ids),
+                    "test_case": test_case_label,
+                    "coverage": coverage_text,
+                    "prefix_values": stakeholder_ids + req_ids + steps + [test_case_label],
+                    "detail": {
+                        "test_case": test_case_label,
+                        "stakeholders": stakeholder_ids,
+                        "requirements": req_ids,
+                        "steps": steps,
+                        "documents": docs,
+                    },
+                },
+                ROLE_PAYLOAD,
+            )
+
+            details = [
+                ("Stakeholder IDs", ", ".join(stakeholder_ids) if stakeholder_ids else "-"),
+                ("Requirement IDs", ", ".join(req_ids) if req_ids else "-"),
+                ("Validation Test Steps", ", ".join(steps) if steps else "-"),
+            ]
+            for key, value in details:
+                children = [QStandardItem(key), QStandardItem(value), QStandardItem(""), QStandardItem(""), QStandardItem("")]
+                parent_items[0].appendRow(children)
+
+            self.test_case_model.appendRow(parent_items)
+
+        self.test_case_view.expandToDepth(0)
+
+    def _refresh_stakeholders(self) -> None:
         if self.results:
-            rows = self.results
+            source_rows = self.results
         else:
-            rows = [
+            source_rows = [
                 AnalysisResult(
                     req_id=req.req_id,
                     stakeholder_id=req.stakeholder_id,
@@ -440,148 +983,85 @@ class ComplianceApp:
                 )
                 for req in self._active_requirements()
             ]
-        filters = getattr(self, "coverage_filter_vars", None)
-        if filters:
-            stakeholder_filter = filters["stakeholder"].get().strip().lower()
-            req_filter = filters["requirement"].get().strip().lower()
-            covered_filter = filters["covered"].get().strip().upper()
-            linked_filter = filters["linked"].get().strip().lower()
 
-            def _matches(res: AnalysisResult) -> bool:
-                stakeholder_val = (res.stakeholder_id or "").lower()
-                req_val = (res.req_id or "").lower()
-                covered_val = "YES" if res.covered else "NO"
-                linked_val = ", ".join(res.test_steps).lower() if res.test_steps else ""
-
-                if stakeholder_filter and stakeholder_filter not in stakeholder_val:
-                    return False
-                if req_filter and req_filter not in req_val:
-                    return False
-                if covered_filter in ("YES", "NO") and covered_val != covered_filter:
-                    return False
-                if linked_filter and linked_filter not in linked_val:
-                    return False
-                return True
-
-            rows = [r for r in rows if _matches(r)]
-
-        rows = sorted(
-            rows,
-            key=lambda r: (
-                (r.stakeholder_id or "").lower(),
-                (r.req_id or "").lower(),
-                r.covered,
-                ", ".join(r.test_cases).lower() if r.test_cases else "",
-                ", ".join(r.test_steps).lower() if r.test_steps else "",
-            ),
-        )
-        for res in rows:
-            iid = self._coverage_row_key(res)
-            covered = "YES" if res.covered else "NO"
-            cases = self._format_test_case_label(res.test_cases)
-            steps = ", ".join(res.test_steps) if res.test_steps else "-"
-            tag = self.coverage_row_colors.get(iid)
-            self.coverage_tree.insert(
-                "",
-                tk.END,
-                iid=iid,
-                values=(res.stakeholder_id or "", res.req_id, covered, cases, steps, res.source_doc),
-                tags=([tag] if tag else []),
+        by_stakeholder: Dict[str, dict] = {}
+        for row in source_rows:
+            stakeholder = row.stakeholder_id or "UNSPECIFIED"
+            entry = by_stakeholder.setdefault(
+                stakeholder,
+                {
+                    "stakeholder_id": stakeholder,
+                    "requirements": 0,
+                    "covered": 0,
+                    "uncovered": 0,
+                    "coverage_pct": 0.0,
+                    "test_cases": set(),
+                    "requirement_ids": [],
+                    "test_steps": set(),
+                },
             )
+            entry["requirements"] += 1
+            entry["covered"] += 1 if row.covered else 0
+            entry["uncovered"] += 0 if row.covered else 1
+            entry["requirement_ids"].append(row.req_id)
+            entry["test_cases"].update(row.test_cases)
+            entry["test_steps"].update(row.test_steps)
 
-    def _clear_coverage_filters(self) -> None:
-        for key, var in self.coverage_filter_vars.items():
-            if key == "covered":
-                var.set("All")
-            else:
-                var.set("")
+        rows = []
+        for _, item in sorted(by_stakeholder.items(), key=lambda pair: pair[0].lower()):
+            item["coverage_pct"] = (item["covered"] / item["requirements"] * 100.0) if item["requirements"] else 0.0
+            item["test_cases"] = sorted(item["test_cases"], key=lambda x: x.lower())
+            item["requirement_ids"] = sorted(set(item["requirement_ids"]), key=lambda x: x.lower())
+            item["test_steps"] = sorted(item["test_steps"], key=lambda x: x.lower())
+            rows.append(item)
 
-    @staticmethod
-    def _coverage_row_key(res: AnalysisResult) -> str:
-        stakeholder = res.stakeholder_id or ""
-        source_doc = res.source_doc or ""
-        return f"{res.req_id}||{stakeholder}||{source_doc}"
-
-    def _show_coverage_menu(self, event: tk.Event) -> None:
-        row_id = self.coverage_tree.identify_row(event.y)
-        if not row_id:
-            return
-        self.coverage_tree.selection_set(row_id)
-        self._coverage_menu_iid = row_id
-        self.coverage_menu.tk_popup(event.x_root, event.y_root)
-
-    def _set_coverage_row_color(self, tag: str) -> None:
-        row_id = self._coverage_menu_iid
-        if not row_id:
-            return
-        self.coverage_row_colors[row_id] = tag
-        if self.coverage_tree.exists(row_id):
-            self.coverage_tree.item(row_id, tags=[tag])
-
-    def _clear_coverage_row_color(self) -> None:
-        row_id = self._coverage_menu_iid
-        if not row_id:
-            return
-        self.coverage_row_colors.pop(row_id, None)
-        if self.coverage_tree.exists(row_id):
-            self.coverage_tree.item(row_id, tags=[])
-
-    @staticmethod
-    def _normalize_test_case_label(label: str) -> str:
-        normalized = " ".join((label or "").strip().split())
-        if not normalized:
-            return normalized
-        if normalized.lower().startswith("test case"):
-            return normalized
-        return f"Test Case {normalized}"
-
-    def _format_test_case_label(self, labels: List[str]) -> str:
-        if not labels:
-            return "-"
-        normalized = [self._normalize_test_case_label(c) for c in labels if c]
-        if not normalized:
-            return "-"
-        normalized = sorted(set(normalized), key=self._test_case_sort_key)
-        return normalized[0]
-
-    @staticmethod
-    def _test_case_sort_key(label: str) -> tuple:
-        match = re.search(r"test case\s+(\d+)", label, re.IGNORECASE)
-        if match:
-            return (0, int(match.group(1)), label.lower())
-        return (1, 10**9, label.lower())
+        self.stakeholder_model.set_rows(rows)
 
     def _refresh_orphans(self) -> None:
-        for item in self.orphan_tree.get_children():
-            self.orphan_tree.delete(item)
-        for orphan in self.orphans:
-            self.orphan_tree.insert(
-                "",
-                tk.END,
-                values=(orphan.ts_id, orphan.ref_id, orphan.source_doc),
-            )
+        self.orphan_model.set_rows(self.orphans)
 
     def _refresh_summary(self) -> None:
-        summary = self.summary or {}
-        active_reqs = self._active_requirements()
-        stakeholders = {req.stakeholder_id for req in active_reqs if req.stakeholder_id}
-        self.summary_vars["total_stakeholders"].set(len(stakeholders))
-        self.summary_vars["total_requirements"].set(summary.get("total_requirements", len(active_reqs)))
-        self.summary_vars["covered_requirements"].set(summary.get("covered_requirements", 0))
-        self.summary_vars["uncovered_requirements"].set(summary.get("uncovered_requirements", 0))
-        coverage_pct = summary.get("coverage_percent", 0)
-        self.summary_vars["coverage_percent"].set(f"{coverage_pct}%")
+        visible_results: List[AnalysisResult] = []
+        for row in range(self.requirements_proxy.rowCount()):
+            idx = self.requirements_proxy.index(row, 0)
+            src = self.requirements_proxy.mapToSource(idx)
+            result = self.requirements_model.row_at(src.row())
+            if result:
+                visible_results.append(result)
+
+        if visible_results:
+            total_requirements = len(visible_results)
+            covered = sum(1 for row in visible_results if row.covered)
+            uncovered = total_requirements - covered
+            stakeholders = {row.stakeholder_id for row in visible_results if row.stakeholder_id}
+            coverage_pct = round((covered / total_requirements) * 100.0, 2) if total_requirements else 0.0
+        else:
+            active_reqs = self._active_requirements()
+            stakeholders = {req.stakeholder_id for req in active_reqs if req.stakeholder_id}
+            total_requirements = self.summary.get("total_requirements", len(active_reqs))
+            covered = self.summary.get("covered_requirements", 0)
+            uncovered = self.summary.get("uncovered_requirements", 0)
+            coverage_pct = self.summary.get("coverage_percent", 0)
+
+        self.summary_labels["total_stakeholders"].setText(str(len(stakeholders)))
+        self.summary_labels["total_requirements"].setText(str(total_requirements))
+        self.summary_labels["covered_requirements"].setText(str(covered))
+        self.summary_labels["uncovered_requirements"].setText(str(uncovered))
+        self.summary_labels["coverage_percent"].setText(f"{coverage_pct}%")
 
     def _confirm_discard(self) -> bool:
         if not self.dirty:
             return True
-        response = messagebox.askyesnocancel(
+        result = QMessageBox.question(
+            self,
             "Unsaved Changes",
             "You have unsaved changes. Save before continuing?",
+            QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel,
+            QMessageBox.Yes,
         )
-        if response is None:
+        if result == QMessageBox.Cancel:
             return False
-        if response:
+        if result == QMessageBox.Yes:
             self.handle_save_project()
             return not self.dirty
         return True
@@ -599,92 +1079,208 @@ class ComplianceApp:
             excluded_req_ids=self.config_requirements,
         )
 
+    def _test_case_label(self, tc: TestCase) -> str:
+        if tc.test_case_id:
+            label = f"Test Case {tc.test_case_id}"
+            if tc.test_case_title:
+                label += f": {tc.test_case_title}"
+            return label
+        return "Unassigned Test Case"
+
     def _open_config_requirements(self) -> None:
-        dialog = tk.Toplevel(self.root)
-        dialog.title("Configuration Requirements")
-        dialog.geometry("520x380")
-        dialog.transient(self.root)
-        dialog.grab_set()
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Configuration Requirements")
+        dialog.resize(540, 420)
+        layout = QVBoxLayout(dialog)
 
-        info = ttk.Label(
-            dialog,
-            text="These requirement IDs are excluded from coverage and summary.",
-            anchor="w",
-        )
-        info.pack(fill="x", padx=10, pady=6)
+        info = QLabel("These requirement IDs are excluded from coverage and summary.")
+        layout.addWidget(info)
 
-        body = ttk.Frame(dialog)
-        body.pack(fill="both", expand=True, padx=10, pady=6)
-
-        listbox = tk.Listbox(body, height=10)
-        listbox.pack(side="left", fill="both", expand=True)
-        scrollbar = ttk.Scrollbar(body, orient="vertical", command=listbox.yview)
-        listbox.configure(yscrollcommand=scrollbar.set)
-        scrollbar.pack(side="right", fill="y")
-
+        listbox = QListWidget()
         for req_id in sorted(self.config_requirements):
-            listbox.insert(tk.END, req_id)
+            listbox.addItem(req_id)
+        layout.addWidget(listbox, 1)
 
-        entry_frame = ttk.Frame(dialog)
-        entry_frame.pack(fill="x", padx=10, pady=6)
-        entry_var = tk.StringVar()
-        ttk.Label(entry_frame, text="Add ID").pack(side="left", padx=4)
-        entry = ttk.Entry(entry_frame, textvariable=entry_var, width=24)
-        entry.pack(side="left", padx=4)
+        add_row = QHBoxLayout()
+        entry = QLineEdit()
+        add_btn = QPushButton("Add")
+        add_row.addWidget(QLabel("Add ID"))
+        add_row.addWidget(entry, 1)
+        add_row.addWidget(add_btn)
+        layout.addLayout(add_row)
+
+        bulk_label = QLabel("Bulk add (comma/space/newline separated)")
+        bulk_text = QPlainTextEdit()
+        bulk_btn = QPushButton("Add Bulk")
+        layout.addWidget(bulk_label)
+        layout.addWidget(bulk_text)
+        layout.addWidget(bulk_btn, 0, Qt.AlignRight)
+
+        action_row = QHBoxLayout()
+        remove_btn = QPushButton("Remove Selected")
+        clear_btn = QPushButton("Clear")
+        apply_btn = QPushButton("Apply")
+        cancel_btn = QPushButton("Cancel")
+        action_row.addWidget(remove_btn)
+        action_row.addWidget(clear_btn)
+        action_row.addStretch()
+        action_row.addWidget(apply_btn)
+        action_row.addWidget(cancel_btn)
+        layout.addLayout(action_row)
 
         def add_single() -> None:
-            val = entry_var.get().strip()
+            val = entry.text().strip()
             if not val:
                 return
-            if val not in listbox.get(0, tk.END):
-                listbox.insert(tk.END, val)
-            entry_var.set("")
-
-        ttk.Button(entry_frame, text="Add", command=add_single).pack(side="left", padx=4)
-
-        bulk_frame = ttk.Frame(dialog)
-        bulk_frame.pack(fill="both", expand=True, padx=10, pady=6)
-        ttk.Label(bulk_frame, text="Bulk add (comma/space/newline separated)").pack(anchor="w")
-        bulk_text = tk.Text(bulk_frame, height=5)
-        bulk_text.pack(fill="both", expand=True)
+            existing = {listbox.item(i).text() for i in range(listbox.count())}
+            if val not in existing:
+                listbox.addItem(val)
+            entry.clear()
 
         def add_bulk() -> None:
-            raw = bulk_text.get("1.0", tk.END)
+            raw = bulk_text.toPlainText()
             parts = re.split(r"[,\s]+", raw.strip())
+            existing = {listbox.item(i).text() for i in range(listbox.count())}
             for part in parts:
-                if not part:
-                    continue
-                if part not in listbox.get(0, tk.END):
-                    listbox.insert(tk.END, part)
-            bulk_text.delete("1.0", tk.END)
-
-        ttk.Button(bulk_frame, text="Add Bulk", command=add_bulk).pack(anchor="e", pady=4)
-
-        actions = ttk.Frame(dialog)
-        actions.pack(fill="x", padx=10, pady=6)
+                if part and part not in existing:
+                    listbox.addItem(part)
+                    existing.add(part)
+            bulk_text.clear()
 
         def remove_selected() -> None:
-            for idx in reversed(listbox.curselection()):
-                listbox.delete(idx)
+            for item in listbox.selectedItems():
+                row = listbox.row(item)
+                listbox.takeItem(row)
 
         def clear_all() -> None:
-            listbox.delete(0, tk.END)
+            listbox.clear()
 
         def apply_and_close() -> None:
-            self.config_requirements = set(listbox.get(0, tk.END))
+            self.config_requirements = {listbox.item(i).text() for i in range(listbox.count())}
             if self.test_cases and self.requirements:
                 self._recompute_analysis()
             self._refresh_all_views()
             self._set_dirty(True)
-            dialog.destroy()
+            dialog.accept()
 
-        ttk.Button(actions, text="Remove Selected", command=remove_selected).pack(side="left", padx=4)
-        ttk.Button(actions, text="Clear", command=clear_all).pack(side="left", padx=4)
-        ttk.Button(actions, text="Apply", command=apply_and_close).pack(side="right", padx=4)
-        ttk.Button(actions, text="Cancel", command=dialog.destroy).pack(side="right", padx=4)
+        add_btn.clicked.connect(add_single)
+        bulk_btn.clicked.connect(add_bulk)
+        remove_btn.clicked.connect(remove_selected)
+        clear_btn.clicked.connect(clear_all)
+        apply_btn.clicked.connect(apply_and_close)
+        cancel_btn.clicked.connect(dialog.reject)
+        dialog.exec()
+
+    def _on_test_case_selected(self) -> None:
+        indexes = self.test_case_view.selectionModel().selectedRows()
+        if not indexes:
+            return
+        source_index = self.test_case_proxy.mapToSource(indexes[0])
+        payload = source_index.data(ROLE_PAYLOAD) or {}
+        detail = payload.get("detail")
+        if not detail:
+            parent = source_index.parent()
+            if parent.isValid():
+                source_index = parent
+                payload = source_index.data(ROLE_PAYLOAD) or {}
+                detail = payload.get("detail")
+        if not detail:
+            return
+
+        text = "\n".join(
+            [
+                f"Test Case: {detail['test_case']}",
+                f"Stakeholder IDs: {', '.join(detail['stakeholders']) if detail['stakeholders'] else '-'}",
+                f"Requirement IDs: {', '.join(detail['requirements']) if detail['requirements'] else '-'}",
+                f"Validation Test Steps: {', '.join(detail['steps']) if detail['steps'] else '-'}",
+                f"Source Documents: {', '.join(detail['documents']) if detail['documents'] else '-'}",
+            ]
+        )
+        self.detail_dock.setWindowTitle("Test Case Details")
+        self.detail_text.setPlainText(text)
+
+    def _on_requirement_selected(self) -> None:
+        indexes = self.requirements_view.selectionModel().selectedRows()
+        if not indexes:
+            return
+        source = self.requirements_proxy.mapToSource(indexes[0])
+        row = self.requirements_model.row_at(source.row())
+        if not row:
+            return
+
+        text = "\n".join(
+            [
+                f"Requirement ID: {row.req_id}",
+                f"Stakeholder ID: {row.stakeholder_id or '-'}",
+                f"Coverage: {'YES' if row.covered else 'NO'}",
+                f"Linked Test Cases: {', '.join(row.test_cases) if row.test_cases else '-'}",
+                f"Step-level Validation: {', '.join(row.test_steps) if row.test_steps else '-'}",
+                f"Source Document: {row.source_doc}",
+            ]
+        )
+        self.detail_dock.setWindowTitle("Requirement Details")
+        self.detail_text.setPlainText(text)
+
+    def _on_stakeholder_selected(self) -> None:
+        indexes = self.stakeholder_view.selectionModel().selectedRows()
+        if not indexes:
+            return
+        source = self.stakeholder_proxy.mapToSource(indexes[0])
+        row = self.stakeholder_model.row_at(source.row())
+        if not row:
+            return
+
+        text = "\n".join(
+            [
+                f"Stakeholder ID: {row['stakeholder_id']}",
+                f"Requirements: {row['requirements']}",
+                f"Covered: {row['covered']}",
+                f"Uncovered: {row['uncovered']}",
+                f"Coverage %: {row['coverage_pct']:.2f}%",
+                f"Requirement IDs: {', '.join(row['requirement_ids']) if row['requirement_ids'] else '-'}",
+                f"Linked Test Cases: {', '.join(row['test_cases']) if row['test_cases'] else '-'}",
+                f"Validation Steps: {', '.join(row['test_steps']) if row['test_steps'] else '-'}",
+            ]
+        )
+        self.detail_dock.setWindowTitle("Stakeholder Details")
+        self.detail_text.setPlainText(text)
+
+    def _on_orphan_selected(self) -> None:
+        indexes = self.orphan_view.selectionModel().selectedRows()
+        if not indexes:
+            return
+        source = self.orphan_proxy.mapToSource(indexes[0])
+        row = self.orphan_model.row_at(source.row())
+        if not row:
+            return
+
+        text = "\n".join(
+            [
+                f"Test Step ID: {row.ts_id}",
+                f"Referenced Requirement: {row.ref_id}",
+                f"Test Document: {row.source_doc}",
+            ]
+        )
+        self.detail_dock.setWindowTitle("Orphan Reference Details")
+        self.detail_text.setPlainText(text)
+
+    def _update_detail_for_current_tab(self) -> None:
+        current = self.tabs.currentIndex()
+        if current == 0:
+            self._on_test_case_selected()
+        elif current == 1:
+            self._on_requirement_selected()
+        elif current == 2:
+            self._on_stakeholder_selected()
+        elif current == 3:
+            self._on_orphan_selected()
+        else:
+            self.detail_dock.setWindowTitle("Details")
+            self.detail_text.setPlainText("Summary dashboard reflects current global filters.")
 
 
 def run_app() -> None:
-    root = tk.Tk()
-    app = ComplianceApp(root)
-    root.mainloop()
+    app = QApplication.instance() or QApplication([])
+    window = ComplianceApp()
+    window.show()
+    app.exec()
