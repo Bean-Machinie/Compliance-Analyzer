@@ -1,2 +1,2 @@
 # Compliance-Analyzer
-A personal software used by THBF to conduct traceability between requirements and test cases.
+A personal software used by THBF to analyze compliance between requirements and test cases.

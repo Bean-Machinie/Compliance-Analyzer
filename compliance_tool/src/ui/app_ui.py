@@ -12,7 +12,6 @@ from src.backend.parser import parse_requirements, parse_test_procedures
 from src.backend.project_manager import ProjectManager
 from src.ui.command_controller import CommandController
 from src.ui.components import labeled_frame, make_tree
-from src.ui.sankey_view import SankeyView
 from src.utils.logger import get_logger
 
 
@@ -66,17 +65,14 @@ class ComplianceApp:
         self.coverage_frame = ttk.Frame(notebook)
         self.orphan_frame = ttk.Frame(notebook)
         self.summary_frame = ttk.Frame(notebook)
-        self.trace_frame = ttk.Frame(notebook)
 
         notebook.add(self.coverage_frame, text="Requirements Coverage")
         notebook.add(self.orphan_frame, text="Orphan Test References")
         notebook.add(self.summary_frame, text="Summary")
-        notebook.add(self.trace_frame, text="Traceability View")
 
         self._build_coverage_tab()
         self._build_orphan_tab()
         self._build_summary_tab()
-        self._build_traceability_tab()
 
     def _build_menu(self) -> None:
         menubar = tk.Menu(self.root)
@@ -199,18 +195,6 @@ class ComplianceApp:
             ttk.Label(frame, text=label).grid(row=i, column=0, sticky="w", padx=6, pady=6)
             ttk.Label(frame, textvariable=self.summary_vars[key]).grid(row=i, column=1, sticky="w", padx=6, pady=6)
 
-        ttk.Separator(frame, orient="horizontal").grid(row=len(rows), column=0, columnspan=2, sticky="ew", pady=6)
-        ttk.Label(frame, text="Quick Filters").grid(row=len(rows) + 1, column=0, sticky="w", padx=6)
-        btn_frame = ttk.Frame(frame)
-        btn_frame.grid(row=len(rows) + 1, column=1, sticky="w", padx=6)
-        ttk.Button(btn_frame, text="All", command=lambda: self._set_trace_coverage("All")).pack(side="left", padx=2)
-        ttk.Button(btn_frame, text="Covered", command=lambda: self._set_trace_coverage("Covered")).pack(side="left", padx=2)
-        ttk.Button(btn_frame, text="Uncovered", command=lambda: self._set_trace_coverage("Uncovered")).pack(side="left", padx=2)
-
-    def _build_traceability_tab(self) -> None:
-        self.sankey_view = SankeyView(self.trace_frame)
-        self.sankey_view.pack(fill="both", expand=True)
-
     def _set_dirty(self, dirty: bool) -> None:
         self.dirty = dirty
         self._update_title()
@@ -219,10 +203,6 @@ class ComplianceApp:
         name = self.project_manager.project_name
         suffix = " *" if self.dirty else ""
         self.root.title(f"Compliance Analyzer - {name}{suffix}")
-
-    def _set_trace_coverage(self, value: str) -> None:
-        self.sankey_view.filters_panel.coverage_var.set(value)
-        self._refresh_sankey()
 
     def handle_new_project(self) -> None:
         if not self._confirm_discard():
@@ -442,7 +422,6 @@ class ComplianceApp:
         self._refresh_coverage()
         self._refresh_orphans()
         self._refresh_summary()
-        self._refresh_sankey()
 
     def _refresh_coverage(self) -> None:
         for item in self.coverage_tree.get_children():
@@ -593,14 +572,6 @@ class ComplianceApp:
         coverage_pct = summary.get("coverage_percent", 0)
         self.summary_vars["coverage_percent"].set(f"{coverage_pct}%")
 
-    def _refresh_sankey(self) -> None:
-        active_reqs = self._active_requirements()
-        stakeholders = sorted({req.stakeholder_id for req in active_reqs if req.stakeholder_id})
-        requirement_ids = sorted({req.req_id for req in active_reqs})
-        test_cases = sorted({tc.ts_id.split(".")[0] for tc in self.test_cases if tc.ts_id})
-        self.sankey_view.set_options(stakeholders, requirement_ids, test_cases)
-        self.sankey_view.set_data(active_reqs, self.test_cases, self.results)
-
     def _confirm_discard(self) -> bool:
         if not self.dirty:
             return True
@@ -637,7 +608,7 @@ class ComplianceApp:
 
         info = ttk.Label(
             dialog,
-            text="These requirement IDs are excluded from coverage, summary, and traceability.",
+            text="These requirement IDs are excluded from coverage and summary.",
             anchor="w",
         )
         info.pack(fill="x", padx=10, pady=6)
