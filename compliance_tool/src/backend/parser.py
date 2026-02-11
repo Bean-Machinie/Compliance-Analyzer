@@ -10,7 +10,7 @@ REQ_PREFIXES_SYSTEM = ("BNC", "DLS", "NSE")
 REQ_PREFIXES_STAKEHOLDER = ("BNCS", "DLSS", "NSES")
 
 ID_PATTERN = re.compile(
-    r"[#\[\(]?\s*(?P<id>(?:BNCS|DLSS|NSES|BNC|DLS|NSE)\s*-?\s*\d+)\s*[\]\)]?"
+    r"[#\[\(]?\s*(?P<id>(?:BNCS|DLSS|NSES|BNC|DLS|NSE)\s*-?\s*\d{3,})\s*[\]\)]?"
 )
 TS_PATTERN = re.compile(r"^\d+(?:\.\d+)*$")
 TEST_CASE_PATTERN = re.compile(

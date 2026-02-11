@@ -2,6 +2,8 @@ from typing import Dict, Iterable, List, Optional, Set, Tuple
 
 from src.backend.models import AnalysisResult, OrphanReference, Requirement, TestCase
 
+STAKEHOLDER_PREFIXES = ("BNCS", "DLSS", "NSES")
+
 
 def analyze(
     requirements: Iterable[Requirement],
@@ -44,6 +46,7 @@ def analyze(
         OrphanReference(ts_id=tc.ts_id, ref_id=tc.ref_id, source_doc=tc.source_doc)
         for tc in tc_list
         if tc.ref_id not in req_ids_for_orphans
+        and not tc.ref_id.startswith(STAKEHOLDER_PREFIXES)
     ]
 
     total = len(req_list)
