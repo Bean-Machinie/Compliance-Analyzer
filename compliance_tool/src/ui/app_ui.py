@@ -123,7 +123,7 @@ class RequirementsMatrixModel(QAbstractTableModel):
         if col == 2:
             return "YES" if row.covered else "NO"
         if col == 3:
-            return self._format_test_case_label(row.test_cases)
+            return self._format_test_case_numbers(row.test_cases)
         if col == 4:
             return ", ".join(row.test_steps) if row.test_steps else "-"
         if col == 5:
@@ -150,8 +150,10 @@ class RequirementsMatrixModel(QAbstractTableModel):
         if column == 2:
             return 0 if row.covered else 1
         if column == 3:
-            first = RequirementsMatrixModel._format_test_case_label(row.test_cases)
-            return RequirementsMatrixModel._test_case_sort_key(first)
+            numbers = RequirementsMatrixModel._extract_test_case_numbers(row.test_cases)
+            if numbers:
+                return (0, tuple(numbers))
+            return (1, _norm(", ".join(row.test_cases)))
         if column == 4:
             return _norm(", ".join(row.test_steps))
         if column == 5:
@@ -168,14 +170,25 @@ class RequirementsMatrixModel(QAbstractTableModel):
         return f"Test Case {normalized}"
 
     @classmethod
-    def _format_test_case_label(cls, labels: List[str]) -> str:
-        if not labels:
+    def _extract_test_case_numbers(cls, labels: List[str]) -> List[int]:
+        values: Set[int] = set()
+        for label in labels or []:
+            normalized = cls._normalize_test_case_label(label)
+            match = re.search(r"test case\s+(\d+)", normalized, re.IGNORECASE)
+            if match:
+                values.add(int(match.group(1)))
+                continue
+            fallback = re.search(r"^\s*(\d+)\s*$", label or "")
+            if fallback:
+                values.add(int(fallback.group(1)))
+        return sorted(values)
+
+    @classmethod
+    def _format_test_case_numbers(cls, labels: List[str]) -> str:
+        numbers = cls._extract_test_case_numbers(labels)
+        if not numbers:
             return "-"
-        normalized = [cls._normalize_test_case_label(c) for c in labels if c]
-        if not normalized:
-            return "-"
-        normalized = sorted(set(normalized), key=cls._test_case_sort_key)
-        return normalized[0]
+        return ", ".join(str(n) for n in numbers)
 
     @staticmethod
     def _test_case_sort_key(label: str) -> tuple:
