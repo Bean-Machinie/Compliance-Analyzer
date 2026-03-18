@@ -17,6 +17,10 @@ TEST_CASE_PATTERN = re.compile(
     r"^\s*(?P<section>\d+(?:\.\d+)*)\s+test\s*case\s*(?P<tcnum>\d+)?\s*:?\s*(?P<title>.*)$",
     re.IGNORECASE,
 )
+BODY_TEST_CASE_PATTERN = re.compile(
+    r"^\s*test\s*case\s*:?\s*(?P<title>.+?)\s*$",
+    re.IGNORECASE,
+)
 
 
 def _is_section(text: str, targets: Iterable[str]) -> bool:
@@ -39,6 +43,15 @@ def _extract_ids(text: str) -> List[str]:
 
 def _normalize_header(text: str) -> str:
     return re.sub(r"[^a-z0-9]", "", (text or "").lower())
+
+
+def _normalize_title(text: str) -> str:
+    return " ".join((text or "").strip().lower().split())
+
+
+def _title_lookup_key(text: str) -> str:
+    normalized = _normalize_title(text)
+    return re.sub(r"\s+\d+$", "", normalized)
 
 
 def _find_header_indices(header_row: List[str]) -> Optional[tuple]:
@@ -112,8 +125,13 @@ def parse_test_procedures(doc_path: str, source_label: Optional[str] = None) -> 
 
     tc_requirements = {}
     tc_titles = {}
+    title_to_tc = {}
     current_tc: Optional[str] = None
     in_requirements = False
+    has_body_test_case_headings = any(
+        BODY_TEST_CASE_PATTERN.match((p.text or "").strip()) for p in doc.paragraphs
+    )
+    in_body_scope = not has_body_test_case_headings
 
     for para in doc.paragraphs:
         text = (para.text or "").strip()
@@ -127,7 +145,26 @@ def parse_test_procedures(doc_path: str, source_label: Optional[str] = None) -> 
             title = (tc_match.group("title") or "").strip()
             if title:
                 tc_titles[tc_num] = title
+                normalized_title = _title_lookup_key(title)
+                if normalized_title:
+                    title_to_tc[normalized_title] = tc_num
             in_requirements = False
+            if has_body_test_case_headings:
+                # In documents with explicit "Test Case : <title>" body headings,
+                # numbered headings are typically TOC entries and should not set scope.
+                current_tc = None
+            continue
+
+        body_tc_match = BODY_TEST_CASE_PATTERN.match(text)
+        if body_tc_match:
+            title = (body_tc_match.group("title") or "").strip()
+            mapped_tc = title_to_tc.get(_title_lookup_key(title))
+            current_tc = mapped_tc
+            in_requirements = False
+            in_body_scope = True
+            continue
+
+        if not in_body_scope:
             continue
 
         if _is_section(text, {"requirements", "requirement"}):
